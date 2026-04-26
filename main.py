@@ -1,20 +1,539 @@
+import os
+import json
+import threading
 import asyncio
+import aiohttp
 import random
-import time
-from telethon import TelegramClient, events, functions, types
+import time 
+from aiohttp import web
+from datetime import datetime
+from telethon import events, functions, types
+from telethon import TelegramClient, events, errors
+from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
 from telethon.tl.types import InputPhoto
-import os
-import json
-from datetime import datetime
+from telethon.tl.types import MessageEntityMentionName
 
-# ---------------- CONFIG ----------------
+#fixed
+asyncio.set_event_loop(asyncio.new_event_loop())
+
+# ----------------- CONFIG -----------------
 API_ID = 31376570
 API_HASH = "6b869ab57239d9b73a0ac1964f03e9b7"
-SESSION = "telebot"
-OWNER_ID = 6740955542  
+OWNER_ID =6740955542        
+SESSION_STRING="1BVtsOMEBuzL0Ftj9daNVaOeLZZfXt6KYiahNVmEmlR0yEVLLUfWVW7pGm6WV5ES01hZTO-ZviK1gOB4AELs9HgOysxZ7hRviUDbB0Z3OgF7-ATbov-bXOqMPmwS7D2xGu1Ztb4TDH2gihLxd8OM90WHCVUrO_YbEVrChmGp5XvTr5mNPf8Jk4xVkhrXXETWMDG0o_Io3F8D-1FGEZuNWpjtswXVBtR94nt_RODJtA_KqgK1Vtp0kG85hFsoX6Am6zL_8pHoO4LPOPXXUa5iLaD7C7jdKjs2Z-63dwZBQ-iRsnLFO1amNnMiskTZ1oYj-Wuij9V0ZMDrmBPCSkwSilRo8GJpTBFU="
+MUTED_FILE = "muted.json"
+PORT = 10000  # port for web server (if needed)
+# ------------------------------------------
 
+# load/save muted list (set of user ids)
+def load_muted():
+    if not os.path.exists(MUTED_FILE):
+        return set()
+    with open(MUTED_FILE, "r") as f:
+        try:
+            arr = json.load(f)
+            return set(int(x) for x in arr)
+        except Exception:
+            return set()
+
+def save_muted(muted_set):
+    with open(MUTED_FILE, "w") as f:
+        json.dump(list(muted_set), f)
+
+muted = load_muted()
+from telethon.sessions import StringSession
+
+client = TelegramClient(
+    StringSession(SESSION_STRING),
+    API_ID,
+    API_HASH
+)
+
+# Store event handlers to register after client starts
+event_handlers = []
+
+def register_handler(pattern, func, **kwargs):
+    event_handlers.append((pattern, func, kwargs))
+
+# helper: resolve target user from reply / mention / username / id
+async def resolve_target(event):
+    # 1) if reply
+    if event.is_reply:
+        reply = await event.get_reply_message()
+        if reply and reply.sender_id:
+            return reply.sender_id, (await client.get_entity(reply.sender_id))
+    # 2) check entities for mention with user id (MessageEntityMentionName)
+    if event.message.entities:
+        for ent in event.message.entities:
+            if isinstance(ent, MessageEntityMentionName):
+                uid = ent.user_id
+                try:
+                    user = await client.get_entity(uid)
+                    return uid, user
+                except Exception:
+                    pass
+    # 3) check text args: .gmute @username or .gmute 123456
+    parts = event.raw_text.split(maxsplit=1)
+    if len(parts) > 1:
+        target_text = parts[1].strip()
+        # sometimes people include extra text; take first token
+        target_text = target_text.split()[0]
+        # numeric id?
+        if target_text.isdigit():
+            try:
+                uid = int(target_text)
+                user = await client.get_entity(uid)
+                return uid, user
+            except Exception:
+                return None, None
+        # username form like @username or username
+        if target_text.startswith("@"):
+            target_text = target_text[1:]
+        try:
+            entity = await client.get_entity(target_text)
+            return getattr(entity, "id", None), entity
+        except Exception:
+            return None, None
+    return None, None
+
+# send temporary feedback message and return it
+async def reply_and_pin(event, text):
+    msg = await event.reply(text)
+    return msg
+
+# Command: .gmute
+@client.on(events.NewMessage(pattern=r'^\.gmute(?:\s|$)', func=lambda e: True))
+async def gmute_handler(event):
+    try:
+        # only owner can use
+        if event.sender_id != OWNER_ID:
+            return
+        target_id, user_entity = await resolve_target(event)
+        if not target_id or not user_entity:
+            await event.reply("Use reply or provide @username / user_id to gmute.")
+            return
+        if target_id == OWNER_ID:
+            await event.reply("You can't gmute yourself.")
+            return
+        if target_id in muted:
+            await event.reply(f"{user_entity.first_name} is already globally muted.")
+            return
+        muted.add(int(target_id))
+        save_muted(muted)
+        display = user_entity.first_name or (getattr(user_entity, "username", "User"))
+        await event.reply(f"{display} successfully pel dia gya h 👺")
+    except Exception as ex:
+        await event.reply(f"Error in .gmute: {ex}")
+        # Command: .gunmute
+@client.on(events.NewMessage(pattern=r'^\.gunmute(?:\s|$)', func=lambda e: True))
+async def gunmute_handler(event):
+    try:
+        # only owner can use
+        if event.sender_id != OWNER_ID:
+            return
+        target_id, user_entity = await resolve_target(event)
+        if not target_id or not user_entity:
+            await event.reply("Use reply or provide @username / user_id to gunmute.")
+            return
+        if int(target_id) not in muted:
+            await event.reply(f"{user_entity.first_name} is not muted")
+            return
+        muted.discard(int(target_id))
+        save_muted(muted)
+        display = user_entity.first_name or (getattr(user_entity, "username", "User"))
+        await event.reply(f"{display} chhod dia ladle 👺👺")
+    except Exception as ex:
+        await event.reply(f"Error in .gunmute: {ex}")
+
+# Optional: .gmutedlist to show current list (owner only)
+@client.on(events.NewMessage(pattern=r'^\.gmutedlist(?:\s|$)', func=lambda e: True))
+async def gmuted_list(event):
+    if event.sender_id != OWNER_ID:
+        return
+    if not muted:
+        await event.reply("No one is globally muted.")
+        return
+    text = "Globally muted:\n"
+    for uid in list(muted):
+        try:
+            ent = await client.get_entity(int(uid))
+            name = ent.first_name or getattr(ent, "username", str(uid))
+        except Exception:
+            name = str(uid)
+        text += f" - {name} [{uid}]\n"
+    await event.reply(text)
+
+# Listener: delete incoming messages from muted users
+@client.on(events.NewMessage(incoming=True))
+async def delete_from_muted(event):
+    try:
+        sender = event.sender_id
+        if sender and int(sender) in muted:
+            # Try to delete the message. This will succeed only if:
+            # - you're admin with delete rights in the chat (for groups/channels), OR
+            # - it's a private chat and you delete for yourself
+            try:
+                # event.delete() deletes current message
+                await event.delete()
+            except errors.rpcerrorlist.MessageDeleteForbiddenError:
+                # No permission to delete other's messages in this chat
+                # You can try client.delete_messages(chat, event.message.id) as another approach
+                try:
+                    await client.delete_messages(event.chat_id, [event.message.id])
+                except Exception:
+                    # optionally inform owner (but to avoid spam, we skip)
+                    pass
+            except Exception:
+                # ignore other failures
+                pass
+    except Exception:
+        pass
+
+    # Global variables for reaction and tag tasks
+react_task = None
+tag_task = None
+# Command: .all <message> - tag members one by one
+@client.on(events.NewMessage(pattern=r'^\.all\s+(.+)$', func=lambda e: True))
+async def tag_all_handler(event):
+    global tag_task
+    
+    if event.sender_id != OWNER_ID:
+        return
+    
+    if tag_task:
+        await event.edit("**Tagging already in progress. Use .cancel to stop.**")
+        await asyncio.sleep(0.6)
+        await event.delete()
+        return
+    
+    message_text = event.pattern_match.group(1)
+    
+    await event.edit("**Starting to tag members**")
+    await asyncio.sleep(0.6)
+    await event.delete()
+    
+    # Start tagging task
+    tag_task = asyncio.create_task(tag_members_one_by_one(event.chat_id, message_text))
+
+async def tag_members_one_by_one(chat_id, message_text):
+    global tag_task
+    try:
+        participants = await client.get_participants(chat_id)
+        for user in participants:
+            if not user.bot and user.id != OWNER_ID:
+                try:
+                    await client.send_message(chat_id, f"[{user.first_name}](tg://user?id={user.id}) {message_text}")
+                    await asyncio.sleep(0.7)  # Avoid flood
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    finally:
+        tag_task = None
+
+# Command: .cancel - cancel tagging
+@client.on(events.NewMessage(pattern=r'^\.cancel(?:\s|$)', func=lambda e: True))
+async def cancel_handler(event):
+    global tag_task
+    
+    if event.sender_id != OWNER_ID:
+        return
+    
+    if tag_task:
+        tag_task.cancel()
+        tag_task = None
+        await event.edit("**Tagging cancelled.**")
+        await asyncio.sleep(0.6)
+        await event.delete()
+    else:
+        await event.edit("No tagging in progress.")
+        await asyncio.sleep(0.6)
+        await event.delete()
+
+        # Global variable for spam task
+spam_task = None
+
+# Command: .spam <message> - auto spam message
+@client.on(events.NewMessage(pattern=r'^\.spam\s+(.+)$', func=lambda e: True))
+async def spam_handler(event):
+    global spam_task
+    
+    if event.sender_id != OWNER_ID:
+        return
+    
+    if spam_task:
+        await event.reply("Spam already running. Use .stopspam to stop.")
+        return
+    
+    message_text = event.pattern_match.group(1)
+    
+    await event.reply("🚀 Spam started... Use .stopspam to stop")
+    
+    # Start spam task
+    spam_task = asyncio.create_task(auto_spam(event.chat_id, message_text))
+
+async def auto_spam(chat_id, message_text):
+    global spam_task
+    try:
+        while True:
+            await client.send_message(chat_id, message_text)
+            await asyncio.sleep(1)  # 1 second delay
+    except Exception:
+        pass
+    finally:
+        spam_task = None
+
+# Command: .stopspam - stop spam
+@client.on(events.NewMessage(pattern=r'^\.stopspam(?:\s|$)', func=lambda e: True))
+async def stop_spam_handler(event):
+    global spam_task
+    
+    if event.sender_id != OWNER_ID:
+        return
+    
+    if spam_task:
+        spam_task.cancel()
+        spam_task = None
+        await event.reply("🛑 Spam stopped.")
+    else:
+        await event.reply("❌ No spam running.")
+
+        # Command: .purge - delete messages from replied message to current
+@client.on(events.NewMessage(pattern=r'^\.purge(?:\s|$)', func=lambda e: True))
+async def purge_handler(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
+    if not event.is_reply:
+        await event.reply("❌ Reply to a message to start purge from there.")
+        return
+    
+    try:
+        start_message = await event.get_reply_message()
+        start_id = start_message.id
+        end_id = event.message.id
+        
+        await event.delete()  # Delete the purge command message
+        
+        message_ids = []
+        current_id = start_id
+        
+        while current_id <= end_id:
+            message_ids.append(current_id)
+            current_id += 1
+            # Telegram allows max 100 messages per delete request
+            if len(message_ids) >= 100:
+                await client.delete_messages(event.chat_id, message_ids)
+                message_ids = []
+                await asyncio.sleep(0.5)  # Avoid flood
+        
+        # Delete any remaining messages
+        if message_ids:
+            await client.delete_messages(event.chat_id, message_ids)
+        
+        # Send confirmation (it will be the last message)
+        confirm_msg = await event.respond(f"✅ Purged {end_id - start_id + 1} messages")
+        await asyncio.sleep(3)
+        await confirm_msg.delete()
+        
+    except Exception as e:
+        await event.reply(f"❌ Error during purge: {str(e)}")
+from telethon import events
+import requests, json
+
+@client.on(events.NewMessage(pattern=r'\.num (\d+)'))
+async def number_info(event):
+    num = event.pattern_match.group(1)
+    api = f"https://number-to-information.vercel.app/fetch?key=NO-LOVE&num={num}"
+    try:
+        data = requests.get(api).json()
+        await event.reply(f"📱 Number Info:\n```{json.dumps(data, indent=2)}```")
+    except Exception as e:
+        await event.reply(f"❌ Error: {e}")
+
+@client.on(events.NewMessage(pattern=r'\.vehicle (\S+)'))
+async def vehicle_info(event):
+    vehicle_no = event.pattern_match.group(1)
+    api = f"https://vehicle-2-info.vercel.app/rose-x?vehicle_no={vehicle_no}"
+    try:
+        data = requests.get(api).json()
+        await event.reply(f"🚗 Vehicle Info:\n```{json.dumps(data, indent=2)}```")
+    except Exception as e:
+        await event.reply(f"❌ Error: {e}")
+
+@client.on(events.NewMessage(pattern=r'\.aadhar (\d{12})'))
+async def aadhar_info(event):
+    aadhaar = event.pattern_match.group(1)
+    api = f"https://rose-x-tool.vercel.app/fetch?key=@Ros3_x&aadhaar={aadhaar}"
+    try:
+        data = requests.get(api).json()
+        await event.reply(f"🪪 Aadhaar Info:\n```{json.dumps(data, indent=2)}```")
+    except Exception as e:
+        await event.reply(f"❌ Error: {e}")
+        # ------------------------------
+# GOOGLE SEARCH CONFIG
+# ------------------------------
+GOOGLE_API_KEY = "AIzaSyBPnt16fUVxu78zWOdVmYhiByj-hooPL2U"           # yaha api key
+CX_ID = "52a3d9bf39f3b4594"                      # tera CX ID
+
+# ------------------------------
+# SEARCH COMMAND
+# ------------------------------
+@client.on(events.NewMessage(pattern=r"\.search (.+)"))
+async def search_google(event):
+    query = event.pattern_match.group(1)
+
+    await event.reply("🔎 Searching… for results wait…")
+
+    url = (
+        f"https://www.googleapis.com/customsearch/v1?"
+        f"key={GOOGLE_API_KEY}&cx={CX_ID}&q={query}"
+    )
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await event.reply("❌ API se sahi response nahi aaya.")
+                    return
+
+                data = await resp.json()
+
+    except Exception as e:
+        await event.reply(f"⚠️ Error: {str(e)}")
+        return
+
+    if "items" not in data:
+        await event.reply("😕 Koi result nahi mila.")
+        return
+
+    results = data["items"][:3]
+
+    msg = f"🔍 **Search results for:** `{query}`\n\n"
+
+    for item in results:
+        title = item.get("title", "No Title")
+        desc = item.get("snippet", "No description available")
+        link = item.get("link", "")
+
+        msg += f"🟢 **{title}**\n📄 {desc}\n🔗 {link}\n\n"
+
+    image_url = None
+    try:
+        for item in results:
+            if "pagemap" in item and "cse_image" in item["pagemap"]:
+                image_url = item["pagemap"]["cse_image"][0]["src"]
+                break
+    except:
+        image_url = None
+
+    if image_url:
+        await event.reply(msg)
+    else:
+        await event.reply(msg)
+        
+       # List of funny death messages with emojis
+death_messages = [
+    "🪦 **{username} mar chuka hai!**\n\n💀 User ki aatma ko shanti mile\n☠️ Ashtiyan gutter ke paani mein bah gayi\n⚰️ Ab wo sirf hamari yaadon mein hai",
+    "🔫 **{username} ko eliminate kar diya gaya!**\n\n💥 Headshot with facts!\n🩸 Digital blood everywhere!\n🎯 Perfect aim, target neutralized!",
+    "☠️ **{username} ka game over ho gaya!**\n\n👻 Ab wo ghost mode mein hain\n💸 Resurrection ke liye 1000₹ ka lagenge\n🪦 RIP in pieces!",
+    "💣 **{username} bomb blast mein shaheed!**\n\n💥 KABOOM! Direct hit!\n🔥 Poora system crash ho gaya!\n🪦 Ab coding karne ke liye next life ka intezar karein",
+    "⚰️ **{username} ki maut ho gayi!**\n\n🐍 Python ne kaat liya!\n🤖 Bot ne betrayal kar diya!\n💀 User deleted from existence!"
+]
+
+# List of funny kidnap messages with emojis
+kidnap_messages = [
+    "🚗 **{username} ko successfully kidnap kar liya gaya!** 🎭\n\n🔒 Ab yeh mere basement mein locked hain\n💵 Ransom: 10,000 memes\n📞 Contact karein: 1800-KIDNAP\n🕵️‍♂️ Police ko pata bhi nahi chalega!",
+    "🎒 **{username} ko bag mein daal kar le gaya!** 👀\n\n🚙 Getaway car ready!\n🗺️ GPS tracking disabled!\n🍕 Hostage ko pizza khilaya jayega!\n⏰ 24 hours mein release honge!",
+    "🦹‍♂️ **{username} ko evil villain utha kar le gaya!** 💨\n\n🏰 Secret hideout mein le jaya ja raha hai\n🔐 Super secure vault mein rakhenge\n🎪 Circus mein bech denge!",
+    "👻 **{username} ko ghost kidnap kar ke le gaya!** 🌪️\n\n🏚️ Haunted mansion mein le jaya ja raha hai\n📱 Signal lost - tracking impossible!\n🍫 Chocolate ke badle chhod denge!",
+    "🚁 **{username} ko helicopter se uthaya gaya!** 🪂\n\n🛩️ Destination: Unknown island\n🏝️ Luxury kidnapping package!\n📸 Instagram worthy kidnapping!"
+]
+ 
+OWNER_ID = 6740955542   # ← Yaha aapka owner ID set hai
+
+@client.on(events.NewMessage(pattern='.kill'))
+async def kill_command(event):
+    """Kill command handler - Owner only"""
+    
+    # ❌ Non-owner → silent
+    if event.sender_id != OWNER_ID:
+        return
+
+    # ❌ Not replying to anyone → friendly reminder
+    if not event.is_reply:
+        await event.reply("❗Target not locked. Reply to someone first!")
+        return
+    
+    try:
+        replied_msg = await event.get_reply_message()
+        user = await client.get_entity(replied_msg.sender_id)
+        
+        username = f"@{user.username}" if user.username else user.first_name
+        
+        # Random death message
+        death_message = random.choice(death_messages)
+        formatted_message = death_message.format(username=username)
+        
+        # Dramatic effect
+        message = await event.reply("🔫 Target Locking...")
+        await asyncio.sleep(1.8)
+        
+        await message.edit("💥 Missile Launching...")
+        await asyncio.sleep(1.8)
+        
+        await message.edit("🎯 Target Hit!")
+        await asyncio.sleep(1)
+
+        await message.edit(formatted_message)
+
+    except:
+        # Custom error message instead of traceback
+        await event.reply("⚠️ Operation Failed! Target Escaped 😶‍🌫️")
+
+
+@client.on(events.NewMessage(pattern='.kidnap'))
+async def kidnap_command(event):
+    """Kidnap command handler - Owner only"""
+    # Check if user is owner
+    if event.sender_id != OWNER_ID:
+        await event.reply("❌ **Ye command use krne ki aukat nhi h mittar 👺👺!** 🚫")
+        return
+    
+    if not event.is_reply:
+        await event.reply("❌ **Kidnap karne ke liye kisi message par reply karein!**")
+        return
+    
+    try:
+        replied_msg = await event.get_reply_message()
+        user = await client.get_entity(replied_msg.sender_id)
+        
+        username = f"@{user.username}" if user.username else user.first_name
+        
+        # Select random kidnap message
+        kidnap_message = random.choice(kidnap_messages)
+        formatted_message = kidnap_message.format(username=username)
+        
+        # Add kidnapping drama with message editing
+        message = await event.reply("🚗 Getting ready...")
+        await asyncio.sleep(2)
+        
+        await message.edit("🦹‍♂️ Planning the operation...")
+        await asyncio.sleep(2)
+        
+        await message.edit("🎭 Executing kidnapping...")
+        await asyncio.sleep(2)
+        
+        await message.edit("✅ Success! Target captured!")
+        await asyncio.sleep(1)
+        
+        await message.edit(formatted_message)
+        
+    except Exception as e:
+        await event.reply(f"❌ Kidnap failed! Error: {str(e)}")
+        
 # SANGMATA BOTS FOR NAME HISTORY
 SANGMATA_BOTS = ["@SangMata_BOT", "@SangMata_beta_bot"]
 
@@ -27,417 +546,517 @@ TAG_DELAY = 6      # 🔥 TAG COMMANDS DELAY
 
 # 🔥 BOYS ROAST LINES
 boys_roast = [
-"**BHAI, TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
+"**., TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
     "**TERE JAISE LOGON KO DEKHKAR HI MUTE BUTTON KA INVENTION HUA THA!** 🔇",
-    "**BHAI, TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
+    "**., TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
     "**TU APNE GHAR KA WiFi PASSWORD HAI – SABKO YAAD HAI PAR KISI KAAM KA NAHI!** 📶",
-    "**BHAI TU TOH WALKING CRINGE CONTENT HAI!** 😬",
+    "**. TU TOH WALKING CRINGE CONTENT HAI!** 😬",
     "**TERI PHOTO DEKHKAR CAMERA BHI APNA LENS BAND KAR LETA HAI!** 📸",
-    "**BHAI TU EK CHALTA PHIRTA BUG HAI.** 🐛",
+    "**. TU EK CHALTA PHIRTA BUG HAI.** 🐛",
     "**TU HERO NAHI, SIRF ERROR 404 KA EXAMPLE HAI.** ❌",
 "**TERE JOKES SE CALCULATOR BHI CONFUSE HO JAYE.** 🧮",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
-"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU EK BROKEN LINK HO.** 🔗",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
+"., TERI SHAKAL DEKHKE LAGTA HAI BHAGWAN NE BHI TRIAL VERSION MEIN BANAYA THA. 🤡"
+"TERE JAISE LOGON KE LIYE HI 'BLOCK' BUTTON BANA HAI. 🚫"
+"., TU ITNA FAKE HAI KI TERA SNAPCHAT FILTER BHI EMBARRASS HO JAYE. 🎭"
+"TERI AWAAZ SUNKE LAGTA HAI — MIC NE BHI MUTE KARNA SEEKH LIYA. 🎤🔇"
+"., TU EK CHALTA PHIRTA 'TERMS AND CONDITIONS' HAI — KOI PADHTA NAHI, SAB SKIP KAR DETE HAIN. 📄"
+"TERI PHOTO DEKHKE FACEBOOK NE 'LOW QUALITY CONTENT' KA TAG DIYA. 📸"
+"., TERA DIMAAG HAI YA PENDING UPDATE KA NOTIFICATION? ⏳"
+"TU HERO NAHI, SIRF EK 'SKIP INTRO' BUTTON KA EXAMPLE HAI. ⏭️"
+"TERI BAATEIN SUNKE LAGTA HAI — YOUTUBE KI UNWANTED AD CHAL RAHI HAI. 📺"
+"., TERA EXISTENCE EK '404 NOT FOUND' PAGE JAISA HAI. ❌"
+"TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE RESTORE KARNE SE MUKAR GAYA. 🗑️"
+"., TERA CONFIDENCE AUR TERA TALENT — DONO ALAG ZIP CODES MEIN REHTE HAIN. 🏘️"
+"TERI SHAKAL DEKHKE LAGTA HAI — NATURE NE BHI GALTI KAR DI. 🌍"
+"., TU ITNA SLOW HAI KI GHONGHE NE TUJHE RACE MEIN HARAYA. 🐌"
+"TERI SUCCESS AUR TERI REALITY — DONO MEIN KABHI FLIGHT CANCELLATION HO JATI HAI. ✈️"
+"., TU EK 'LOADING…' JAISA HAI — KABHI COMPLETE NAHI HOTA. 🔄"
+"TERI PERSONALITY CHECK KIYA — 'FILE CORRUPTED' ERROR AAYA. 🖥️"
+"., TU ITNA IRRELEVANT HAI KI GOOGLE MAPS PE BHI 'NO DATA' DIKHTA HAI. 🗺️"
+"TERI EXISTENCE EK TYPO HAI — GALAT JAGAH, GALAT TIME, GALAT PERSONALITY. ⌨️"
+"., TU ITNA 'UNIQUE' HAI KI AVERAGE BHI TUJHE CHODKAR BHAG GAYA. 🏃"
+"TERI BAATON MEIN DUM NAHI, SIRF BACKGROUND NOISE HAI. 🔊"
+"., TU ITNA DESPERATE HAI KI LIKES KE LIYE KHUD KO MEME BANA DIYA. 🤡❤️"
+"TERI PHOTO DEKHKE INSTAGRAM NE 'REPORT' OPTION RECOMMEND KIYA. 📱🚩"
+"., TERA FUTURE PLAN AUR TERA PAST DONO SAME HAIN — DARK AUR UNCLEAR. 🌑"
+"TU ITNA OVERCONFIDENT HAI KI FAILURE BHI TUJHSE EMBARRASSED HAI. 📉😳"
+"TERI LIFE EK FLOP MOVIE KI TARAH HAI — INTERVAL KE BAAD KOI AATA HI NAHI. 🎬"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'BEFORE USE' WALA EXAMPLE HAI. 🧼"
+"., TU ITNA SELF-OBSESSED HAI KI KHUD SE SELFI LETE WAQT BHI FILTER LAGATA HAI. 🤳"
+"TERI BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN — KOI PADHTA NAHI, SAB HATATE HAIN. 🔔"
+"., TU EK CHALTA PHIRTA BUFFERING SYMBOL HAI. ⏳"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'AFTER EFFECTS' KA GALAT EXAMPLE HAI. 🎨"
+"., TERA EGO AUR TERA IQ — DONO ULTRA PRO MAX LEVEL PE HAIN PAR DIRECTION GALAT HAI. 🧠"
+"TERI SUCCESS KA GRAPH DEKHA TOH LAGA — YEH TOH 'FALLING' KA NEW RECORD HAI. 📉"
+"., TU ITNA 'MAIN CHARACTER' HAI KI BACKGROUND MUSIC BHI TUJHE IGNORE KARTA HAI. 🎵"
+"TERI PERSONALITY AUR TERI REALITY — DONO MEIN 5G SPEED KA DIFFERENCE HAI. 📶"
+"., TERA EXISTENCE EK 'WARNING LABEL' DESERVE KARTA HAI — 'USE AT YOUR OWN RISK'. ⚠️"
+"TERI AWAAZ SUNKE SIRI BHI 'I DON'T UNDERSTAND' BOLTI HAI. 📱🤷"
+"., TU ITNA FAKE HAI KI CHATGPT BHI TERA REPLY NAHI KARTA. 🤖"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'PHOTOSHOP' KA 'BEFORE' WALA PART HAI. 🖼️"
+"., TU EK CHALTA PHIRTA 'TERMS AND CONDITIONS' HAI — IMPORTANT NAHI, IRRITATING ZAROOR. 📄"
+"TERI BAATON MEIN WEIGHT NAHI, SIRF LENGTH HAI. 📏"
+"., TERA CONFIDENCE AUR TERA SKILL — DONO ALAG GENERATION KE HAIN. 📱"
+"TERI PHOTO DEKHKE CAMERA NE 'LOW LIGHT WARNING' DI. 📸⚠️"
+"., TU ITNA SLOW HAI KI DIAL-UP INTERNET BHI TUJHE FAST LAGTA HAI. 🐢"
+"TERI EXISTENCE EK 'SPAM FOLDER' JAISI HAI — KABHI OPEN NAHI HOTI. 📂"
+"., TU HERO NAHI, SIRF EK 'ERROR 502' KA EXAMPLE HAI. 🌐"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'FACEBOOK' KA OLD PROFILE PICTURE HAI. 📘"
+"., TERA DIMAAG HAI YA 'STORAGE FULL' KA NOTIFICATION? 📱"
+"TERI BAATEIN SUNKE LAGTA HAI — TU 'YOUTUBE' KA 'SKIP AD' WALA PART HAI. ⏭️"
+"., TU ITNA 'POSITIVE' HAI KI TERI POSITIVITY BHI NEGATIVE LAGTI HAI. 🧘"
+"TERI SUCCESS AUR TERI LIFE — DONO MEIN 'CONNECTION LOST' HO JATA HAI. 📶"
+"., TU EK CHALTA PHIRTA 'BUG' HAI — FIX HONA CHAHIYE. 🐛"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'FACETUNE' KA 'BEFORE' WALA VERSION HAI. 🎨"
+"., TERA PRESENCE DEKHKE LOG SOCHTE HAIN — 'YEH BANDA KYUN HAI YAHAN'? 🧐"
+"TERI BAATON MEIN DUM NAHI, SIRF 'AIR' HAI. 💨"
+"., TU ITNA IRRELEVANT HAI KI TERA BIRTH CERTIFICATE BHI 'DRAFT' MODE MEIN HAI. 📄"
+"TERI PHOTO DEKHKE LAGTA HAI — TU 'FILTER' KA 'AFTER' WALA PART BHUL GAYA. 📸"
+"., TERA FUTURE AUR TERA PRESENT — DONO MEIN 'LOADING' CHAL RAHA HAI. ⏳"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'GOOGLE IMAGES' KA 'LOW RES' WALA PART HAI. 🖼️"
+"., TU EK CHALTA PHIRTA 'GLITCH' HAI — SYSTEM SE BAHR NIKAL. 🖥️"
+"TERI AWAAZ SUNKE LAGTA HAI — TU 'AUDIO' KA 'MUTED' VERSION HAI. 🔇"
+"., TERA EXISTENCE EK 'JOKE' HAI — PAR MazaK KISKO AATA HAI? 🃏"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'NATURE' KA 'REJECTED' VERSION HAI. 🌿"
+"., TU ITNA 'COOL' BANNA CHAHTA HAI JAISE 'FREEZE' BUTTON DAB GAYA HO. ❄️"
+"TERI BAATEIN SUNKE LAGTA HAI — TU 'GOOGLE TRANSLATE' KA 'WRONG' VERSION HAI. 🌐"
+"., TERA CONFIDENCE AUR TERA REALITY — DONO MEIN '5G' KA DIFFERENCE HAI. 📶"
+"TERI PHOTO DEKHKE LAGTA HAI — TU 'PHOTOSHOOT' KA 'BLOOPER' WALA PART HAI. 🎬"
+"., TU EK CHALTA PHIRTA 'POP-UP AD' HAI — SAB BAND KAR DETE HAIN. 🚫"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'MIRROR' KA 'CRACKED' VERSION HAI. 🪞"
+"., TERA DIMAAG HAI YA 'PENDING INSTALLATION'? 📲"
+"TERI EXISTENCE EK 'RECYCLE BIN' KA 'PERMANENT' WALA PART HAI. 🗑️"
+"., TU ITNA 'UNIQUE' HAI KI 'BEING AVERAGE' BHI TUJHE 'EXCLUSIVE' LAGTA HAI. 🦄"
+"TERI BAATEIN SUNKE LAGTA HAI — TU 'SIRI' KA 'GLITCH' WALA VERSION HAI. 🍎"
+"., TERA PRESENCE DEKHKE LOG 'DO NOT DISTURB' MODE ON KAR DETE HAIN. 📵"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'ADOBE' KA 'TRIAL' VERSION HAI. 🎨"
+"., TERA CAREER GRAPH AUR TERI HEIGHT — DONO SAME HAIN — BAS BARABAR NAHI BADHE. 📉"
+"TERI PHOTO DEKHKE LAGTA HAI — TU 'INSTAGRAM' KA 'ARCHIVED' WALA PART HAI. 📸"
+"., TU EK CHALTA PHIRTA 'ERROR 404' HAI — MILA HI NAHI. 🔍"
+"TERI AWAAZ SUNKE LAGTA HAI — TU 'AUDIO' KA 'CORRUPTED' FILE HAI. 🎵"
+"., TERA EXISTENCE EK 'TRIAL VERSION' HAI — EXPIRE KAB HO RAHA HAI? ⏳"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'PAINT' MEIN BANAYA GAYA '3D' MODEL HAI. 🎨"
+"., TERA CONFIDENCE AUR TERA SKILL — DONO MEIN 'LATENCY' HAI. 🎮"
+"TERI BAATEIN SUNKE LAGTA HAI — TU 'CHATGPT' KA 'BETA' VERSION HAI. 🤖"
+"., TU ITNA 'MAIN CHARACTER' HAI KI LOG TUJHE 'BACKGROUND' MEIN BHI IGNORE KARTE HAIN. 👥"
+"TERI PHOTO DEKHKE LAGTA HAI — TU 'SNAPCHAT' KA 'FILTER' BHUL GAYA. 👻"
+"., TERA DIMAAG HAI YA 'LOW BATTERY' KA WARNING? 🔋"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'ZOOM' KA 'BLUR BACKGROUND' WALA PART HAI. 🖥️"
+"., TU EK CHALTA PHIRTA 'SPAM' HAI — BLOCK HONE KA INTZAAR KAR RAHA. 🚫"
+"TERI EXISTENCE EK 'NOTIFICATION' JAISI HAI — KOI OPEN NAHI KARTA. 🔔"
+"., TU ITNA 'FAKE' HAI KI 'REALITY' BHI TUJHSE DUR BHAGTI HAI. 🏃"
+"TERI AWAAZ SUNKE LAGTA HAI — TU 'YOUTUBE' KA 'MUTED' WALA AD HAI. 📺"
+"., TERA PRESENCE DEKHKE LOG 'SKIP' BUTTON DHUNDHTE HAIN. ⏭️"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'PHOTOSHOP' KA 'LAYER' BHUL GAYA. 🖼️"
+"., TERA CAREER AUR TERI LIFE — DONO 'AIRPLANE MODE' MEIN HAIN. ✈️"
+"TERI BAATEIN SUNKE LAGTA HAI — TU 'GOOGLE' KA 'NO RESULTS' WALA PAGE HAI. 🔍"
+"., TU EK CHALTA PHIRTA 'BUFFERING' HAI — COMPLETE KAB HOGA? ⏳"
+"TERI PHOTO DEKHKE LAGTA HAI — TU 'CAMERA' KA 'LENS CAP' BHUL GAYA. 📸"
+"., TERA CONFIDENCE AUR TERI REALITY — DONO 'OFFLINE' HAIN. 📴"
+"TERI SHAKAL DEKHKE LAGTA HAI — TU 'BHAGWAN' KA 'MISTAKE' WALA PART HAI. 😇"
+"., TU HERO NAHI, SIRF EK 'CAPTCHA' HAI — HAR KOI TUJHE 'SKIP' KARTA HAI. 🤖"
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU EK OFFLINE FILE JAISA HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
+"**. TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MEMBER HO WHATSAPP GROUP KA.** 🔇",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LIFE KA BETA VERSION HAI.** 🧪",
+"**. TU LIFE KA BETA VERSION HAI.** 🧪",
 "**TU EK CHALTA PHIRTA CAPTCHA HAI.** 🔢",
 "**TERE BAATEIN BACKGROUND NOISE JAISI HAI.** 🎧",
 "**TU CHALTA PHIRTA DEMO ACCOUNT HAI.** 📝",
-"**BHAI TU WALKING ERROR MESSAGE HO.** ❌",
+"**. TU WALKING ERROR MESSAGE HO.** ❌",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE LOGIC KE AAGE CALCULATOR BHI FAIL HO JAYE.** 🧮",
 "**TU EK CANCELLED DOWNLOAD KA EXAMPLE HAI.** ⬇️",
-"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU LIFE KA GLITCH HO.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
+"**. TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎬",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HO – SABKO SKIP KARNA HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HO – SAB IGNORE KARTE HAI.** 📅",
-"**BHAI TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HO.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HO JO HAMESHA CRASH HOTI HAI.** 📱",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**BHAI TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
+"**. TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
 "**TU EK CRASHED APP HAI – KABHI OPEN NAHI HOTA.** 📱",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**BHAI TU LIFE KA BUG REPORT HAI.** 🐛",
+"**. TU LIFE KA BUG REPORT HAI.** 🐛",
 "**TU EK FORWARDED MESSAGE JAISA HAI – IGNORE KARTA SABKO.** 📩",
 "**TERE HAIRSTYLE SE BARBER BHI SHOCK HO JAYE.** 💇‍♂️",
 "**TU CHALTA PHIRTA CAPTCHA HAI – SABKO CONFUSE KARTA.** 🔢",
-"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
+"**. TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU EK CANCELLED CALL HO – KOI NAHI SUNTA.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN BHI PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA POSTER HAI.** 🖼️",
-"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO ACCOUNT HAI – INCOMPLETE AUR USELESS.** 📝",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU WALKING TYPO HAI.** ✏️",
-"**BHAI TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
+"**. TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF TEASER VIDEO KA CLIP HAI.** 🎬",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**BHAI TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
+"**. TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU EK WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HAI – SAB IGNORE KARTE HAIN.** 📅",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HAI JO HAMESHA CRASH HOTI HAI.** 📱",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
-"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU CHALTA PHIRTA WIFI ERROR HAI.** 📶",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TU EK WALKING TYPO HAI.** ✏️",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HAI – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
+"**. TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – KOI NAHI DEKHTA.** 📄",
 "**TERE UPDATES HAMESHA PENDING HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAIN.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**BHAI TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
+"**. TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🖱️",
 "**TERE BAAT KARTE HI SABKO LAGTA HAI SPAM CALL AAYI.** 📞",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-    "**BHAI, TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
+    "**., TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
     "**TERE JAISE LOGON KO DEKHKAR HI MUTE BUTTON KA INVENTION HUA THA!** 🔇",
-    "**BHAI, TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
+    "**., TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
     "**TU APNE GHAR KA WiFi PASSWORD HAI – SABKO YAAD HAI PAR KISI KAAM KA NAHI!** 📶",
-    "**BHAI TU TOH WALKING CRINGE CONTENT HAI!** 😬",
+    "**. TU TOH WALKING CRINGE CONTENT HAI!** 😬",
     "**TERI PHOTO DEKHKAR CAMERA BHI APNA LENS BAND KAR LETA HAI!** 📸",
-    "**BHAI TU CHAI KI PYALI KI TARAH HAI – GARAM HAI PAR KISI KO PASAND NAHI!** ☕",
+    "**. TU CHAI KI PYALI KI TARAH HAI – GARAM HAI PAR KISI KO PASAND NAHI!** ☕",
     "**TERE JAISE LOGON KE LIYE HI BLOCK BUTTON BANA HAI!** 🚫",
-    "**BHAI TU INSTAGRAM REELS KI TARAH HAI – 15 SECOND MEIN BORING!** ⏱️",
+    "**. TU INSTAGRAM REELS KI TARAH HAI – 15 SECOND MEIN BORING!** ⏱️",
     "**TERE DIMAG KI SPEED 2G HAI – LOAD HONE MEIN 10 SAAL LAGTE HAIN!** 🐌"
 ]
 
@@ -660,7 +1279,7 @@ abuse_roast = [
     "u|   TUJHE AB TAK NAHI SMJH AYA KI MAI HI HU TUJHE PAIDA KARNE WALA BHOSDIKEE APNI MAA SE PUCH RANDI KE BACHEEEE 🤩👊👤😍",
     "uM   TERI MAA KE BHOSDE MEI SPOTIFY DAL KE LOFI BAJAUNGA DIN BHAR 😍🎶🎶💥",
     "JUNGLE ME NACHTA HE MORE TERI MAAKI CHUDAI DEKKE SAB BOLTE ONCE MORE ONCE MORE 🤣🤣💦💋�I   GALI GALI ME REHTA HE SAND TERI MAAKO CHOD DALA OR BANA DIA RAND 🤤🤣�",
-    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE BHAI DEDIYA",
+    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE . DEDIYA",
     "MAA KAA BJSODAAA� MADARXHODDDz TERIUUI MAAA KAA BHSODAAAz-TERIIIIII BEHENNNN KO CHODDDUUUU MADARXHODDDDz NIKAL MADARCHODz RANDI KE BACHEz TERA MAA MERI FANz TERI SEXY BAHEN KI CHUT",
     "BETE TU BAAP SE LEGA PANGA TERI MAAA KO CHOD DUNGA KARKE NANGA 💦💋",
     "CHAL BETA TUJHE MAAF KIA 🤣 ABB APNI GF KO BHEJ",
@@ -725,7 +1344,7 @@ abuse_roast = [
     "TERREEEEEEEEEEE MUH MEIN MERAAAAAAAAA LODAAAAAAAAAAAA",
     "TERI MAA KA NAYA RANDI KHANA KHOLUNGA CHINTA MAT KAR 👊🤣🤣😳",
     "CHAKKAAAAAAAAAAAAAAA HAI TUUUUUUUUUUUUUUUUUUUU BSDKKKKKKKKKKKKKKKK",
-    "TᏒᎥᎥᎥᎥᎥᎥᎥᎥᎥ mᎪᎪᎪᎪᎪ ᏦᎥᎥᎥᎥᎥᎥ xhuҬҬҬҬҬҬҬ ᎶᎪᏒᎪᎪm hᎪᎪᎪᎥ ᏒᎪᏁᎠᎥ 🤣😂︵‿︵‿︵‿︵‿︵‿█▄▄ ███ █▄▄♥️╣[-_-]╠♥️👅👅",
+    "TᏒᎥᎥᎥᎥᎥᎥᎥᎥᎥ mᎪᎪᎪᎪᎪ ᏦᎥᎥᎥᎥᎥᎥ xhuҬҬҬҬҬҬҬ ᎶᎪᏒᎪᎪm hᎪᎪᎪᎥ ᏒᎪᏁᎠᎥ 🤣😂��‿︵‿︵‿︵‿︵‿█▄▄ ███ █▄▄♥️╣[-_-]╠♥️👅👅",
     "🤬 Oye circuit ke reject version!",
     "😡 Tere jaise logon ke wajah se WiFi password badalte hain!",
     "👎 Tera sense of humor Windows error jaisa hai!",
@@ -823,7 +1442,7 @@ abuse_roast = [
     "**SUAR KE BACHHE!** 🐖",
     "**GAANDU!** 🍑",
     "**LODE!** 🍆"
-    "**BHAINS KI AULAAD!** 🐃",
+    "**.NS KI AULAAD!** 🐃",
     "**KUTTE KE PILLE!** 🐕",
     "**SUAR KE BACHHE!** 🐖",
     "**GAANDU!** 🍑",
@@ -1503,8 +2122,8 @@ hindi_boys_roast = [
     "**तेरी attitude सुनकर Instagram bhi ignore कर देता है!** 📜",
     "**भाई, तू ringtone की तरह है – start hota है, par कोई enjoy नहीं करता!** 📢",
     "**तेरी selfies देखकर camera भी blush कर जाता है!** 📸",
-    "**भाई, तू battery saver mode की तरह है – low energy aur low impact!** 🔋",
-    "**तेरी jokes सुनकर podcast भी exit कर देता है!** 🎙️",
+    "**भाई, तू battery saver mode की तरह ह�� – low energy aur low impact!** 🔋",
+    "**तेरी jokes स��नकर podcast भी exit कर देता है!** 🎙️",
     "**अरे सुन, तेरी selfies देखकर camera भी confuse हो जाता है!** 🤯",
     "**तेरी makeup skills देखकर YouTube tutorials भी फेल लगते हैं!** 💄",
     "**भाभी, तू filter की तरह है – बिना Photoshop useless!** 🖌️",
@@ -2092,9 +2711,9 @@ hindi_flirt_lines = [
     "**तुम मेरी धड़कनों का सबसे प्यारा संगीत हो 🎵**",
     "**तुम मेरी दुनिया का सबसे खूबसूरत हिस्सा हो 🌟**",
     "**तुम मेरी हर सुबह की मुस्कान हो 🌅**",
-    "**तुम मेरी धड़कनों की सबसे मधुर धुन हो 🎶**",
+    "**तुम मेरी धड़कनों की सबसे ��धुर धुन हो 🎶**",
     "**तुम मेरी जिंदगी का सबसे मधुर ख्वाब हो ✨**",
-    "**तुम मेरी खुशियों की सबसे प्यारी वजह हो 🌹**",
+    "**तुम मेरी खुशियों की सबसे प्यार��� वजह हो 🌹**",
     "**तुम मेरी हर रात की सबसे खूबसूरत रौशनी हो 🌙**",
     "**तुम मेरी दुनिया का सबसे रोशन हिस्सा हो ☀️**",
     "**तुम मेरी धड़कनों का सबसे मधुर संगीत हो 🎵**",
@@ -3572,7 +4191,7 @@ reply_raid_lines = [
     "u|   TUJHE AB TAK NAHI SMJH AYA KI MAI HI HU TUJHE PAIDA KARNE WALA BHOSDIKEE APNI MAA SE PUCH RANDI KE BACHEEEE 🤩👊👤😍",
     "uM   TERI MAA KE BHOSDE MEI SPOTIFY DAL KE LOFI BAJAUNGA DIN BHAR 😍🎶🎶💥",
     "JUNGLE ME NACHTA HE MORE TERI MAAKI CHUDAI DEKKE SAB BOLTE ONCE MORE ONCE MORE 🤣🤣💦💋�I   GALI GALI ME REHTA HE SAND TERI MAAKO CHOD DALA OR BANA DIA RAND 🤤🤣�",
-    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE BHAI DEDIYA",
+    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE . DEDIYA",
     "MAA KAA BJSODAAA� MADARXHODDDz TERIUUI MAAA KAA BHSODAAAz-TERIIIIII BEHENNNN KO CHODDDUUUU MADARXHODDDDz NIKAL MADARCHODz RANDI KE BACHEz TERA MAA MERI FANz TERI SEXY BAHEN KI CHUT",
     "BETE TU BAAP SE LEGA PANGA TERI MAAA KO CHOD DUNGA KARKE NANGA 💦💋",
     "CHAL BETA TUJHE MAAF KIA 🤣 ABB APNI GF KO BHEJ",
@@ -4961,7 +5580,7 @@ mass_love_raid_lines = [
     "**Tere saath bitaye pal meri yaadon me hamesha rahenge 🌃**",
     "**Tere hone se meri duniya ek nayi roshni me chamakti hai ☀️**",
     "**Tere ishq me dooba hoon, har pal ek nayi tasveer hai 🖼️**",
-    "**Tere saath ki khushboo mere liye ek dua hai 🙏**",
+    "**Tere saath ki khushboo mere liye ek dua hai ���**",
     "**Tere bina dil ka har kona veeran lagta hai 🌵**",
     "**Tu hi mera sitara, tu hi meri manzil ✨**",
     "**Tere saath ka har lamha meri zindagi ka sabse khoobsurat pal hai 💖**",
@@ -6132,407 +6751,407 @@ raid_shayari_lines = [
 
 # 🔥 ROAST BOY RAID LINES
 roast_boy_raid_lines = [
-"**BHAI, TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
+"**., TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
     "**TERE JAISE LOGON KO DEKHKAR HI MUTE BUTTON KA INVENTION HUA THA!** 🔇",
-    "**BHAI, TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
+    "**., TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
     "**TU APNE GHAR KA WiFi PASSWORD HAI – SABKO YAAD HAI PAR KISI KAAM KA NAHI!** 📶",
-    "**BHAI TU TOH WALKING CRINGE CONTENT HAI!** 😬",
+    "**. TU TOH WALKING CRINGE CONTENT HAI!** 😬",
     "**TERI PHOTO DEKHKAR CAMERA BHI APNA LENS BAND KAR LETA HAI!** 📸",
-    "**BHAI TU EK CHALTA PHIRTA BUG HAI.** 🐛",
+    "**. TU EK CHALTA PHIRTA BUG HAI.** 🐛",
     "**TU HERO NAHI, SIRF ERROR 404 KA EXAMPLE HAI.** ❌",
 "**TERE JOKES SE CALCULATOR BHI CONFUSE HO JAYE.** 🧮",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
-"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU EK BROKEN LINK HO.** 🔗",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU EK OFFLINE FILE JAISA HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
+"**. TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MEMBER HO WHATSAPP GROUP KA.** 🔇",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LIFE KA BETA VERSION HAI.** 🧪",
+"**. TU LIFE KA BETA VERSION HAI.** 🧪",
 "**TU EK CHALTA PHIRTA CAPTCHA HAI.** 🔢",
 "**TERE BAATEIN BACKGROUND NOISE JAISI HAI.** 🎧",
 "**TU CHALTA PHIRTA DEMO ACCOUNT HAI.** 📝",
-"**BHAI TU WALKING ERROR MESSAGE HO.** ❌",
+"**. TU WALKING ERROR MESSAGE HO.** ❌",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE LOGIC KE AAGE CALCULATOR BHI FAIL HO JAYE.** 🧮",
 "**TU EK CANCELLED DOWNLOAD KA EXAMPLE HAI.** ⬇️",
-"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU LIFE KA GLITCH HO.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
+"**. TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎬",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HO – SABKO SKIP KARNA HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HO – SAB IGNORE KARTE HAI.** 📅",
-"**BHAI TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HO.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HO JO HAMESHA CRASH HOTI HAI.** 📱",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**BHAI TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
+"**. TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
 "**TU EK CRASHED APP HAI – KABHI OPEN NAHI HOTA.** 📱",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**BHAI TU LIFE KA BUG REPORT HAI.** 🐛",
+"**. TU LIFE KA BUG REPORT HAI.** 🐛",
 "**TU EK FORWARDED MESSAGE JAISA HAI – IGNORE KARTA SABKO.** 📩",
 "**TERE HAIRSTYLE SE BARBER BHI SHOCK HO JAYE.** 💇‍♂️",
 "**TU CHALTA PHIRTA CAPTCHA HAI – SABKO CONFUSE KARTA.** 🔢",
-"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
+"**. TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU EK CANCELLED CALL HO – KOI NAHI SUNTA.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN BHI PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA POSTER HAI.** 🖼️",
-"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO ACCOUNT HAI – INCOMPLETE AUR USELESS.** 📝",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU WALKING TYPO HAI.** ✏️",
-"**BHAI TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
+"**. TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF TEASER VIDEO KA CLIP HAI.** 🎬",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**BHAI TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
+"**. TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU EK WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HAI – SAB IGNORE KARTE HAIN.** 📅",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HAI JO HAMESHA CRASH HOTI HAI.** 📱",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
-"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU CHALTA PHIRTA WIFI ERROR HAI.** 📶",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TU EK WALKING TYPO HAI.** ✏️",
-"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HAI – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
+"**. TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – KOI NAHI DEKHTA.** 📄",
 "**TERE UPDATES HAMESHA PENDING HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAIN.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**BHAI TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
+"**. TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
+"**. TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🖱️",
 "**TERE BAAT KARTE HI SABKO LAGTA HAI SPAM CALL AAYI.** 📞",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
+"**. TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️"
 ]
 
@@ -6737,7 +7356,7 @@ roast_abuse_raid_lines = [
     "u|   TUJHE AB TAK NAHI SMJH AYA KI MAI HI HU TUJHE PAIDA KARNE WALA BHOSDIKEE APNI MAA SE PUCH RANDI KE BACHEEEE 🤩👊👤😍",
     "uM   TERI MAA KE BHOSDE MEI SPOTIFY DAL KE LOFI BAJAUNGA DIN BHAR 😍🎶🎶💥",
     "JUNGLE ME NACHTA HE MORE TERI MAAKI CHUDAI DEKKE SAB BOLTE ONCE MORE ONCE MORE 🤣🤣💦💋�I   GALI GALI ME REHTA HE SAND TERI MAAKO CHOD DALA OR BANA DIA RAND 🤤🤣�",
-    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE BHAI DEDIYA",
+    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE . DEDIYA",
     "MAA KAA BJSODAAA� MADARXHODDDz TERIUUI MAAA KAA BHSODAAAz-TERIIIIII BEHENNNN KO CHODDDUUUU MADARXHODDDDz NIKAL MADARCHODz RANDI KE BACHEz TERA MAA MERI FANz TERI SEXY BAHEN KI CHUT",
     "BETE TU BAAP SE LEGA PANGA TERI MAAA KO CHOD DUNGA KARKE NANGA 💦💋",
     "CHAL BETA TUJHE MAAF KIA 🤣 ABB APNI GF KO BHEJ",
@@ -7730,7 +8349,7 @@ hindi_roast_girl_raid_lines = [
     "**तुम playlist की तरह हो – shuffle करो, phir भी boring!** 🎶",
     "**तुम selfies की तरह हो – filter blush कर जाती है!** 🖌️",
     "**तुम makeup की तरह हो – start hoti हो, par कोई enjoy नहीं करता!** 💄",
-    "**तुम attitude की तरह हो – Instagram bhi ignore कर देता है!** 📜",
+    "**तुम attitude की तरह ���ो – Instagram bhi ignore कर देता है!** 📜",
     "**तुम battery saver mode की तरह हो – low energy aur low impact!** 🔋",
     "**तुम WiFi password की तरह हो – complicated aur कोई याद नहीं रखता!** 🔑",
     "**तुम offline mode की तरह हो – interact नहीं होती!** ⛔",
@@ -8414,7 +9033,7 @@ middle_finger_lines = [
     "**🖕 GAANDU! 🖕😂**",
     "**🖕 LODE! 🖕😂**",
     "**🖕 KUTTE KE PILLE! 🖕😂**",
-    "**🖕 BHAINS KI AULAAD! 🖕😂**",
+    "**🖕 .NS KI AULAAD! 🖕😂**",
     "**🖕 TERI KI MAA KI CHUT! 🖕😂**",
     "**🖕 HARAMI! 🖕😂**",
     "**🖕 GANDI NAALI KA BACCHA! 🖕😂**",
@@ -8449,9 +9068,6 @@ user_clones = {}
 original_profile = {}
 user_status = "online"
 name_history = {}
-
-# ---------------- CLIENT ----------------
-client = TelegramClient(SESSION, API_ID, API_HASH)
 
 # ------------ HELPERS -------------------
 def is_owner(event):
@@ -9289,14 +9905,7 @@ async def stop_flirt_girl_raid_handler(event):
     else: status_msg = await event.reply("❌ No active flirt girl raid")
     await delete_after_delay(status_msg)
 
-@client.on(events.NewMessage(pattern=r"^\.(stop_hindi_roast_boy_raid|shrbr)$"))
-async def stop_hindi_roast_boy_raid_handler(event):
-    if not is_owner(event): return
-    await delete_command_message(event)
-    if event.chat_id in hindi_roast_boy_raid_targets:
-        hindi_roast_boy_raid_targets.pop(event.chat_id); status_msg = await event.reply("🛑 Hindi roast boy raid stopped")
-    else: status_msg = await event.reply("❌ No active hindi roast boy raid")
-    await delete_after_delay(status_msg)
+
 
 @client.on(events.NewMessage(pattern=r"^\.(stop_hindi_roast_girl_raid|shrgr)$"))
 async def stop_hindi_roast_girl_raid_handler(event):
@@ -9633,7 +10242,7 @@ async def stop_all_handler(event):
     if event.chat_id in raid100_targets: raid100_targets.pop(event.chat_id); stopped_count += 1
     if event.chat_id in raid_targets: raid_targets.pop(event.chat_id); stopped_count += 1
     status_msg = await event.reply(f"🛑 Stopped {stopped_count} tasks"); await delete_after_delay(status_msg)
-
+0
 @client.on(events.NewMessage(pattern=r"^\.(stop_roast|stoproast|str)$"))
 async def stop_roast(event):
     if not is_owner(event): return
@@ -9694,6 +10303,18 @@ async def spam_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event)); ongoing_tasks[event.chat_id] = task
     status_msg = await event.reply(f"💣 Spam started! {count} messages"); await delete_after_delay(status_msg)
+
+    # ---------------------------
+# KEEP ALIVE FUNCTION
+# ---------------------------
+async def keep_alive():
+    while True:
+        try:
+            await client.send_message("me", "🟢 Alive")  # self-ping
+        except Exception as e:
+            print("KeepAlive Error:", e)
+        await asyncio.sleep(600)  # 10 minutes
+
 
 # 📱 STATUS COMMAND - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(status|stat)\b"))
@@ -9824,6 +10445,20 @@ async def help_handler(event):
     """
     await event.reply(help_msg)
 
+async def handle(request):
+    return web.Response(text="Userbot running", status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+
 # 🚀 START COMMAND
 @client.on(events.NewMessage(pattern=r"^\.(start|stt)$"))
 async def start_handler(event):
@@ -9831,15 +10466,23 @@ async def start_handler(event):
     await delete_command_message(event)
     start_msg = await event.reply("🤖 **Ultimate Bot Started!**\n\n⏰ **Current Delay:** 6 seconds\nUse `.delay <seconds>` to change delay\n\nUse `.help` to see all commands."); await delete_after_delay(start_msg)
 
-# --------------- RUN -------------------
-print("🤖 Ultimate Bot is starting...")
-print("🔍 SangMata Bots Integrated: @SangMata_BOT, @SangMata_beta_bot")
-print("🎬 Animation Commands Added: .hack & .middlefinger")
-print("📢 Broadcast Commands Added: .bdm, .bgrp, .bchn, .ball")
-print("⚙️ Delay Settings: 6 seconds for all commands")
-print("🔥 All features loaded!")
-print("⚡️ Ready to use!")
-print(f"👤 Owner ID: {OWNER_ID}")
 
-with client:
-    client.run_until_disconnected()
+# Start the client
+async def main():
+    print("Starting userbot...")
+    await client.start()
+    #fake web server
+    await start_web_server()
+    # Start keep-alive task
+    client.loop.create_task(keep_alive())
+    me = await client.get_me()
+    print(f"Logged in as: {me.first_name} ({me.id})")
+    print("Muted list:", muted)
+    # run until disconnected
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    try:
+        client.loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Stopped by user.")
