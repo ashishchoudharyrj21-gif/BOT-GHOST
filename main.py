@@ -452,7 +452,7 @@ kidnap_messages = [
     "🚁 **{username} ko helicopter se uthaya gaya!** 🪂\n\n🛩️ Destination: Unknown island\n🏝️ Luxury kidnapping package!\n📸 Instagram worthy kidnapping!"
 ]
  
-OWNER_ID =6740955542   # ← Yaha aapka owner ID set hai
+OWNER_ID =6305002830   # ← Yaha aapka owner ID set hai
 
 @client.on(events.NewMessage(pattern='.kill'))
 async def kill_command(event):
