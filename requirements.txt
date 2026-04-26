@@ -1,4 +1,6 @@
-telethon==1.34.0
-cryptg
-pyaes
-asyncio
+telethon==1.35.0
+aiohttp
+python-dotenv
+pillow
+qrcode
+requests
