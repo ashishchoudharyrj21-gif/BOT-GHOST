@@ -22,7 +22,7 @@ asyncio.set_event_loop(asyncio.new_event_loop())
 API_ID = 31376570
 API_HASH = "6b869ab57239d9b73a0ac1964f03e9b7"
 OWNER_ID =6740955542        
-SESSION_STRING="1BVtsOJgBu3-YgaoEzQ3pMuX5bDitkeKbysTfsk91lYrT4sbyzqHdwFXiseWODjCgrwRojvCXYdZWdLkOoqBjM2ADBJgUgYBW-NfjMewrF7c95kCTn8u18zvvQpImu8N4xt6FhDi4_qn1VzLaN_yjO7PhMjEZkxKKIdtqYuSg8OMtwN9Co8iTSvMrsTuBYS-LWlGNMgDKgu6wLHiAvtT_t-dRvxXTCA1YhFwspDv9kfxqdLPWntIBxxX9kSLZYrBWwX52LGe4UK10lzTGRcHF2gKjjR9bGIvSilprzYgGVa11isN5HUJU0EV7ViAaAcAP11z2WBXbnrNiYg3HUfxnm9FLgxBmP9s="
+SESSION_STRING="1BVtsOG8Bu1AGoSSDhDBi5amCiIq47dn-GKQAwbfEbKB-NTO3bhr3Ec4U6rey-IBH8c5UXCJ-mBVoDQbKicp3d2QKdPEgfwjUyuSP5paxnOByuPPuwZgzQXvTOWoPPDfmJYSZU5HXyJtTjWU-xJM2GmvVVjffYQLGHFeI_woGXWldvE4NDy36nBVt17PQ5C2Idt0xotX9L0u_gJWLs-3XZ4Ww7aNBnlYLAGr-OF0quiTtqOTTIq8Ih1K_fl8mMgqxJ9W1LForboqbrKOTdS8liHJyfZkUG-5BzCrYpAYsZ2Hb0Hqurs03a0ka7gdvgKnh1E6el6qZrJx0bkBiuZ6_iUg1DJeR-6o="
 MUTED_FILE = "muted.json"
 PORT = 10000  # port for web server (if needed)
 # ------------------------------------------
