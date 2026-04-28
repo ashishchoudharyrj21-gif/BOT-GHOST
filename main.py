@@ -19,10 +19,10 @@ from telethon.tl.types import MessageEntityMentionName
 asyncio.set_event_loop(asyncio.new_event_loop())
 
 # ----------------- CONFIG -----------------
-API_ID = 31376570
-API_HASH = "6b869ab57239d9b73a0ac1964f03e9b7"
-OWNER_ID =6740955542        
-SESSION_STRING="1BVtsOG8Bu1AGoSSDhDBi5amCiIq47dn-GKQAwbfEbKB-NTO3bhr3Ec4U6rey-IBH8c5UXCJ-mBVoDQbKicp3d2QKdPEgfwjUyuSP5paxnOByuPPuwZgzQXvTOWoPPDfmJYSZU5HXyJtTjWU-xJM2GmvVVjffYQLGHFeI_woGXWldvE4NDy36nBVt17PQ5C2Idt0xotX9L0u_gJWLs-3XZ4Ww7aNBnlYLAGr-OF0quiTtqOTTIq8Ih1K_fl8mMgqxJ9W1LForboqbrKOTdS8liHJyfZkUG-5BzCrYpAYsZ2Hb0Hqurs03a0ka7gdvgKnh1E6el6qZrJx0bkBiuZ6_iUg1DJeR-6o="
+API_ID = 31461295
+API_HASH = "0f151c9b78b4b067c24d30b3160cf14d"
+OWNER_ID =8355551382      
+SESSION_STRING="1BVtsOKwBuwie_GRG6loXfoGSqplj6J-OYKJloS75P6yj67FmzFNNgL8uYAwzqtgh9Y4VHoFfCqcBDS0G5gGomwYSZpl00QADynpEzCpSS4UVH3NCPLwiC2MALzUSY8uK9fpfQ1xHAKh-VN7tyh9PvlSUlf7aCyN4neHUUougY3WGvoI1HTgVpSPJxZFPnxt2UB2gTPnAsjRjo89fLOAnWsunGuX_0VXAdgLTi9NGSkMyx5e9T7-pxLiGkTHjhliKsDNyFe_aKUiKxK23hEKQNQEEfpPbiq6siR5Qh7cLaX4BeFmrFh6Kq7LfMYCzOCpXVLk_6lqRD51N5LyH8gcUJ522EE54hPI="
 MUTED_FILE = "muted.json"
 PORT = 10000  # port for web server (if needed)
 # ------------------------------------------
