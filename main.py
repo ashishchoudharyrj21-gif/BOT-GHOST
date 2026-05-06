@@ -1,31 +1,393 @@
 import os
 import json
 import threading
+import colorsys
+import qrcode
+import sys
+import io
 import asyncio
+import logging
 import aiohttp
-import random
-import time 
-from aiohttp import web
 from datetime import datetime
+import random
+import re
+import base64
+import tempfile
+import gtts
+from gtts import gTTS
+import wave
+import numpy as np
+import time 
+from io import BytesIO
+from pathlib import Path
+from aiohttp import web
+from PIL import Image, ImageDraw, ImageFont
+from telethon.tl import functions
+from telethon.tl.functions.messages import ReportRequest
+# Army features ke liye imports
+from telethon.tl.functions.messages import ExportChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.errors import FloodWaitError
+from telethon.tl.types import InputReportReasonSpam, InputReportReasonViolence, InputReportReasonPornography, InputReportReasonOther
+from telethon.tl.functions.phone import (
+    JoinGroupCallRequest,
+    LeaveGroupCallRequest,
+    GetGroupCallRequest,
+    CreateGroupCallRequest
+)
+from telethon.errors import ChatAdminRequiredError
+from telethon.tl.types import MessageEntityMention
+from telethon.tl.functions.messages import UpdatePinnedMessageRequest
+from datetime import datetime, timedelta
+from telethon.tl.functions.users import GetFullUserRequest
+from telethon import Button
+from telethon.tl.functions.channels import EditBannedRequest
+from telethon.tl.functions.channels import EditAdminRequest
+from telethon.tl.types import ChatAdminRights
 from telethon import events, functions, types
+from telethon.tl.types import User
+from telethon.tl.functions.messages import ReportRequest
+from telethon.tl.types import InputReportReasonSpam
+from telethon.tl.types import ChatBannedRights
+from telethon.tl.functions.channels import GetParticipantsRequest
+from telethon.tl.types import ChannelParticipantsAdmins
+from telethon import events
+from telethon.tl.functions.contacts import BlockRequest
+from telethon import TelegramClient, events
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.errors import FloodWaitError
 from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
 from telethon.tl.types import InputPhoto
 from telethon.tl.types import MessageEntityMentionName
-
+from pytgcalls import PyTgCalls
+from pytgcalls.types import MediaStream, AudioQuality, VideoQuality, update
+import yt_dlp
+import ffmpeg
+import edge_tts
 #fixed
 asyncio.set_event_loop(asyncio.new_event_loop())
 
-# ----------------- CONFIG -----------------
+# Create logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# ----------------- CONFIG -----------------s
+
 API_ID = 31461295
 API_HASH = "0f151c9b78b4b067c24d30b3160cf14d"
 OWNER_ID =8355551382      
 SESSION_STRING="1BVtsOLcBu71sWJamaW4e1e_T5TA9fJCB_HfExphwjMqkt92qfHuaXJ1-hQEUxC9w_47xQ7kRCAD_toIzB5Y-kr_ct_PAL46uLl3afgkmnxKzWPwBPr9xUAHv2KUEVYitLvm6qUQ6RfXwwxh2IEJa8ibjm2DVvuRn-O_Mah1gsAWiv5dql5PweTjI_QYQ_b7yfQYa791vfRRew69iWJaHjmy1Ie_3Q8sQjwtYcx1X5dInL72CM_d4YUG32hDF8oXhxHvcuQwdj7XaDetWEHAleiNm9YQ5eEv69keBiJvi7IeZFXMUx4ly0E2BZxcqm2fSeK0YI1rmnfD-nkIei7TOnvRmwMhTJr8="
 MUTED_FILE = "muted.json"
+STATE_FILE = "state.json"
+GBAN_FILE = "gban_list.json"
+STORAGE_FILE = "user_replies.json" 
 PORT = 10000  # port for web server (if needed)
+os.environ["PATH"] += r";C:\ffmpeg\bin"
+os.environ["PATH"] += r";C:\ffprobe\bin"
 # ------------------------------------------
+
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+
+# ----------------- VC MUSIC CLASS -----------------
+class VCMusicPlayer:
+    def __init__(self, client):
+        self.client = client
+        self.call = PyTgCalls(client)
+        self.started = False
+
+        self.queue = []
+        self.loop = False
+        self.current = None
+        self.play_task = None
+
+    async def start(self):
+        if not self.started:
+            await self.call.start()
+            self.started = True
+
+    # ───── EXTRACT AUDIO (NO DOWNLOAD) ─────
+    async def extract_audio(self, query):
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                if query.startswith(("http://", "https://")):
+                    info = ydl.extract_info(query, download=False)
+                else:
+                    results = ydl.extract_info(f"ytsearch:{query}", download=False)
+                    info = results["entries"][0]
+
+                return (
+                    info.get("url"),
+                    info.get("title", "Unknown"),
+                    info.get("duration", 0),
+                    info.get("thumbnail"),
+                )
+        except:
+            return None, None, None, None
+
+    # ───── EXTRACT VIDEO (NO DOWNLOAD) ─────
+    async def extract_video(self, query):
+        ydl_opts = {
+            "format": "best[height<=720]/best",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                if query.startswith(("http://", "https://")):
+                    info = ydl.extract_info(query, download=False)
+                else:
+                    results = ydl.extract_info(f"ytsearch:{query}", download=False)
+                    info = results["entries"][0]
+
+                return (
+                    info.get("url"),
+                    info.get("title", "Unknown"),
+                    info.get("duration", 0),
+                    info.get("thumbnail"),
+                )
+        except:
+            return None, None, None, None
+
+    # ───── PLAY FUNCTION (AUDIO OR VIDEO) ─────
+    async def play_song(self, chat_id, url, title, duration, thumb, is_video=False):
+
+        if is_video:
+            media = MediaStream(
+                url,
+                audio_parameters=AudioQuality.STUDIO,
+                video_parameters=VideoQuality.HD_720p,
+            )
+        else:
+            media = MediaStream(
+                url,
+                audio_parameters=AudioQuality.STUDIO,
+            )
+
+        await self.call.play(chat_id, media)
+
+        self.current = (url, title, duration, thumb, is_video)
+                              
+        caption = f"""
+```╭━━━━⟬ ➲ Started Streaming ⟭━━━━╮
+┃
+┃⟡➣ Title : {title}
+┃⟡➣ Duration : {duration}
+┃⟡➣ Loop : {'ON' if self.loop else 'OFF'}
+┃⟡➣ Queue : {len(self.queue)} songs
+╰━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+
+        if thumb:
+            try:
+                await self.client.send_file(chat_id, thumb, caption=caption)
+            except:
+                await self.client.send_message(chat_id, caption)
+        else:
+            await self.client.send_message(chat_id, caption)
+
+        if self.play_task:
+            self.play_task.cancel()
+
+        if duration:
+            self.play_task = asyncio.create_task(
+                self.auto_next(chat_id, duration)
+            )
+
+    async def auto_next(self, chat_id, duration):
+        await asyncio.sleep(duration)
+
+        if self.loop and self.current:
+            await self.play_song(chat_id, *self.current)
+            return
+
+        if not self.queue:
+            await self.call.leave(chat_id)
+            self.current = None
+            return
+
+        next_song = self.queue.pop(0)
+        await self.play_song(chat_id, *next_song)
+
+
+vc_player = None
+
+# ================= COMMANDS =================
+
+@client.on(events.NewMessage(pattern=r"\.vply(?:\s+(.*))?"))
+async def vplay_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    global vc_player
+
+    if vc_player is None:
+        vc_player = VCMusicPlayer(client)
+
+    await vc_player.start()
+
+    query = event.pattern_match.group(1)
+    if not query:
+        await event.reply("❌ Usage: .vply <video name or link>")
+        return
+
+    await event.delete()
+    chat_id = event.chat_id
+    msg = await event.respond("🎬 Searching Video...")
+
+    url, title, duration, thumb = await vc_player.extract_video(query.strip())
+
+    if not url:
+        await msg.edit("❌ Video not found!")
+        return
+
+    if vc_player.current:
+        vc_player.queue.append((url, title, duration, thumb, True))
+        await msg.edit(f"➲ Video Added To Queue:\n{title}")
+        return
+
+    await vc_player.play_song(chat_id, url, title, duration, thumb, True)
+    await msg.delete()
+
+
+@client.on(events.NewMessage(pattern=r"\.ply(?:\s+(.*))?"))
+async def play_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    global vc_player
+
+    if vc_player is None:
+        vc_player = VCMusicPlayer(client)
+
+    await vc_player.start()
+    await delete_command_message(event)
+
+    if not event.pattern_match.group(1):
+        await event.reply("🎵 Please provide song name or link.\nExample: `.play Believer`")
+        return
+
+    query = event.pattern_match.group(1).strip()
+    chat_id = event.chat_id
+    msg = await event.reply("**🎶 Searching ✨...**")
+
+    # 🔹 Direct extract (no download)
+    url, title, duration, thumb = await vc_player.extract_audio(query)
+
+    if not url:
+        await msg.edit("❌ Song not found!")
+        return
+
+    if vc_player.current:
+        vc_player.queue.append((url, title, duration, thumb, False))
+        await msg.edit(f"➲ Aᴅᴅᴇᴅ Tᴏ Qᴜᴇᴜᴇ:\n\n ‣ Tɪᴛʟᴇ : **{title}**")
+        return
+
+    await vc_player.play_song(chat_id, url, title, duration, thumb, False)
+    await msg.delete()
+ 
+
+@client.on(events.NewMessage(pattern=r"\.skip"))
+async def skip_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
+    global vc_player
+
+    if not vc_player or not vc_player.current:
+        await event.reply("**❌ Nothing to skip!**")
+        return
+
+    if vc_player.play_task:
+        vc_player.play_task.cancel()
+
+    if not vc_player.queue:
+        await vc_player.call.leave_call(chat_id=event.chat_id)
+        vc_player.current = None
+        await event.reply("**⏹ No more songs in queue.**")
+        return
+
+    next_song = vc_player.queue.pop(0)
+    await vc_player.play_song(event.chat_id, *next_song)
+
+
+@client.on(events.NewMessage(pattern=r"\.loop"))
+async def loop_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
+    global vc_player
+    if not vc_player:
+        return
+    vc_player.loop = not vc_player.loop
+    await event.reply(f"**🔁 Loop {'Enabled 🔄' if vc_player.loop else 'Disabled ❌**'}")
+
+
+@client.on(events.NewMessage(pattern=r"\.queue"))
+async def queue_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    global vc_player
+    if not vc_player or not vc_player.queue:
+        await event.reply("*📭 Queue is empty!**")
+        return
+
+    text = "**‣ ǫᴜᴇᴜᴇ ʟɪsᴛ:**\n\n"
+    for i, (_, title, _, _) in enumerate(vc_player.queue, 1):
+        text += f"{i}. 🎶 {title}\n"
+
+    await event.reply(text)
+
+
+@client.on(events.NewMessage(pattern=r"\.clear"))
+async def clear_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
+    global vc_player
+    if not vc_player:
+        return
+    vc_player.queue.clear()
+    await event.reply("*🗑 Queue cleared!**")
+
+
+@client.on(events.NewMessage(pattern=r"\.end"))
+async def end_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    global vc_player
+    await delete_command_message(event)
+    if vc_player is None:
+        await event.reply("❌ VC player not started.")
+        return
+
+    if vc_player.play_task:
+        vc_player.play_task.cancel()
+
+    try:
+        await vc_player.call.leave_call(chat_id=event.chat_id) 
+    except Exception as e:
+        await event.reply(f"Error: {e}")
+        return
+
+    vc_player.queue.clear()
+    vc_player.current = None
+
+    await event.reply("**⏹ Voice chat ended.**")
+
 
 # load/save muted list (set of user ids)
 def load_muted():
@@ -43,13 +405,7 @@ def save_muted(muted_set):
         json.dump(list(muted_set), f)
 
 muted = load_muted()
-from telethon.sessions import StringSession
 
-client = TelegramClient(
-    StringSession(SESSION_STRING),
-    API_ID,
-    API_HASH
-)
 
 # Store event handlers to register after client starts
 event_handlers = []
@@ -110,50 +466,99 @@ async def gmute_handler(event):
         # only owner can use
         if event.sender_id != OWNER_ID:
             return
+        
+        # Delete command message after 1 second
+        await asyncio.sleep(0.5)
+        await event.delete()
+        
         target_id, user_entity = await resolve_target(event)
         if not target_id or not user_entity:
-            await event.reply("Use reply or provide @username / user_id to gmute.")
+            response = await event.reply("**Use reply or provide @username / user_id to gmute.**")
+            await asyncio.sleep(1)
+            await response.delete()
             return
+            
         if target_id == OWNER_ID:
-            await event.reply("You can't gmute yourself.")
+            response = await event.reply("**You can't gmute yourself.**")
+            await asyncio.sleep(1)
+            await response.delete()
             return
+            
         if target_id in muted:
-            await event.reply(f"{user_entity.first_name} is already globally muted.")
+            response = await event.reply(f"**{user_entity.first_name} is already globally muted.**")
+            await asyncio.sleep(1)
+            await response.delete()
             return
+            
         muted.add(int(target_id))
         save_muted(muted)
-        display = user_entity.first_name or (getattr(user_entity, "username", "User"))
-        await event.reply(f"{display} successfully pel dia gya h 👺")
+        
+        # Get username for mention or use user ID
+        username = getattr(user_entity, "username", None)
+        if username:
+            display = f"@{username}"
+        else:
+            display = f"[{user_entity.first_name}](tg://user?id={target_id})"
+        
+        response = await event.reply(f"**{display}😶 has been globally muted 🔇🔕**")
+        
     except Exception as ex:
-        await event.reply(f"Error in .gmute: {ex}")
-        # Command: .gunmute
+        response = await event.reply(f"**Error in .gmute: {ex}**")
+        await asyncio.sleep(1)
+        await response.delete()
+
 @client.on(events.NewMessage(pattern=r'^\.gunmute(?:\s|$)', func=lambda e: True))
 async def gunmute_handler(event):
     try:
         # only owner can use
         if event.sender_id != OWNER_ID:
             return
+        
+        # Delete command message after 1 second
+        await asyncio.sleep(0.5)
+        await event.delete()
+        
         target_id, user_entity = await resolve_target(event)
         if not target_id or not user_entity:
-            await event.reply("Use reply or provide @username / user_id to gunmute.")
+            response = await event.reply("**Use reply or provide @username / user_id to gunmute.**")
+            await asyncio.sleep(1)
+            await response.delete()
             return
+            
         if int(target_id) not in muted:
-            await event.reply(f"{user_entity.first_name} is not muted")
+            response = await event.reply(f"**{user_entity.first_name} is not muted**")
+            await asyncio.sleep(1)
+            await response.delete()
             return
+            
         muted.discard(int(target_id))
         save_muted(muted)
-        display = user_entity.first_name or (getattr(user_entity, "username", "User"))
-        await event.reply(f"{display} chhod dia ladle 👺👺")
+        
+        # Get username for mention or use user ID
+        username = getattr(user_entity, "username", None)
+        if username:
+            display = f"@{username}"
+        else:
+            display = f"[{user_entity.first_name}](tg://user?id={target_id})"
+        
+        response = await event.reply(f"**{display} 🎁 has been globally unmuted 🔊🔔**")
+        
     except Exception as ex:
-        await event.reply(f"Error in .gunmute: {ex}")
+        response = await event.reply(f"**Error in .gunmute: {ex}**")
+        await asyncio.sleep(1)
+        await response.delete()
+
 
 # Optional: .gmutedlist to show current list (owner only)
 @client.on(events.NewMessage(pattern=r'^\.gmutedlist(?:\s|$)', func=lambda e: True))
 async def gmuted_list(event):
     if event.sender_id != OWNER_ID:
         return
+        
     if not muted:
         await event.reply("No one is globally muted.")
+        await asyncio.sleep(1)
+        await event.delete()
         return
     text = "Globally muted:\n"
     for uid in list(muted):
@@ -194,6 +599,123 @@ async def delete_from_muted(event):
     # Global variables for reaction and tag tasks
 react_task = None
 tag_task = None
+
+@client.on(events.NewMessage(pattern=r'\.extract'))
+async def extract_handler(event):
+    """Extract phone number from target bot"""
+    try:
+        # Delete the command message immediately
+        await event.delete()
+        
+        # Check if user replied to someone
+        if not event.is_reply:
+            error_msg = await event.reply("❌ Please reply to a user to extract their info!")
+            await asyncio.sleep(3)
+            await error_msg.delete()
+            return
+        
+        replied_msg = await event.get_reply_message()
+        target_user = replied_msg.sender_id
+        
+        # Send fetching message
+        fetching_msg = await event.reply("⚡ 𝐅𝐞𝐭𝐜𝐡𝐢𝐧𝐠 𝐃𝐞𝐭𝐚𝐢𝐥𝐬...")
+        
+        # Target bot username
+        TARGET_BOT = '@mzjugabot'
+        
+        # Send target user ID to bot
+        await client.send_message(TARGET_BOT, f"{target_user}")
+        
+        # Wait for bot's response
+        await asyncio.sleep(3)
+        
+        # Get bot's response
+        phone_found = False
+        extracted_phone = "Not Found"
+        extracted_id = str(target_user)
+        
+        async for msg in client.iter_messages(TARGET_BOT, limit=1):
+            bot_response = msg
+            
+            # Check if bot replied with inline button
+            if bot_response and bot_response.reply_markup and bot_response.reply_markup.rows:
+                
+                # Look for button with text "telegram"
+                for row in bot_response.reply_markup.rows:
+                    for button in row.buttons:
+                        if 'telegram' in button.text.lower():
+                            
+                            # Click the telegram button
+                            await bot_response.click(data=button.data)
+                            await asyncio.sleep(2)
+                            
+                            # Get the final response
+                            async for final_msg in client.iter_messages(TARGET_BOT, limit=1):
+                                final_response = final_msg
+                                
+                                # Parse the bot's response - UPDATED REGEX
+                                response_text = final_response.text
+                                
+                                # Extract ID (with markdown formatting)
+                                id_match = re.search(r'\*\*ID:\*\*\s*`(\d+)`', response_text) or \
+                                          re.search(r'💬\s*\*\*ID:\*\*\s*`(\d+)`', response_text)
+                                
+                                # Extract phone number (with markdown formatting)
+                                phone_match = re.search(r'\*\*Телефон:\*\*\s*`(\+?\d+)`', response_text) or \
+                                            re.search(r'📞\s*\*\*Телефон:\*\*\s*`(\+?\d+)`', response_text)
+                                
+                                if id_match:
+                                    extracted_id = id_match.group(1)
+                                
+                                if phone_match:
+                                    extracted_phone = phone_match.group(1)
+                                    phone_found = True
+                                else:
+                                    # Try alternate format without backticks
+                                    phone_match2 = re.search(r'Телефон:\s*(\+?\d+)', response_text)
+                                    if phone_match2:
+                                        extracted_phone = phone_match2.group(1)
+                                        phone_found = True
+                                
+                            break
+                            
+        # Delete fetching message
+        await fetching_msg.delete()
+        
+        # Final stylish response
+        final_output = f"""
+```╭━━━━⟬📱 PHONE LOOKUP⟭━━━━╮
+┃                           
+┃    ✦➣ 🎯 Target: {target_user}
+┃                           
+┃    ✦➣ 📞 Phone: +{extracted_phone}
+┃                           
+┃    ✦➣ 🏷️ Found by BLAZY_XSOUL
+┃                           
+╰━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+        
+        await event.reply(final_output)
+        
+    except Exception as e:
+        # Agar koi error aaye toh bhi Not Found response bhejo
+        try:
+            target_user = replied_msg.sender_id if 'replied_msg' in locals() else "Unknown"
+            error_output = f"""
+```╭━━━━⟬📱 PHONE LOOKUP⟭━━━━╮
+┃                           
+┃    ✦➣ 🎯 Target: {target_user}
+┃                           
+┃    ✦➣ 📞 Phone: Not Found 
+┃                           
+┃    ✦➣ 🏷️ Found by BLAZY_XSOUL
+┃                           
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+            await event.reply(error_output)
+        except:
+            await event.reply(f"❌ Error: {str(e)}")
+        
 # Command: .all <message> - tag members one by one
 @client.on(events.NewMessage(pattern=r'^\.all\s+(.+)$', func=lambda e: True))
 async def tag_all_handler(event):
@@ -202,17 +724,19 @@ async def tag_all_handler(event):
     if event.sender_id != OWNER_ID:
         return
     
+    await delete_command_message(event)
+    
     if tag_task:
-        await event.edit("**Tagging already in progress. Use .cancel to stop.**")
+        await event.reply("**Tagging already in progress. Use .cancel to stop.**")
         await asyncio.sleep(0.6)
         await event.delete()
         return
     
     message_text = event.pattern_match.group(1)
     
-    await event.edit("**Starting to tag members**")
-    await asyncio.sleep(0.6)
-    await event.delete()
+    reply = await event.reply("**Starting to tag members......**")
+    await asyncio.sleep(0.8)
+    await reply.delete()
     
     # Start tagging task
     tag_task = asyncio.create_task(tag_members_one_by_one(event.chat_id, message_text))
@@ -225,7 +749,7 @@ async def tag_members_one_by_one(chat_id, message_text):
             if not user.bot and user.id != OWNER_ID:
                 try:
                     await client.send_message(chat_id, f"[{user.first_name}](tg://user?id={user.id}) {message_text}")
-                    await asyncio.sleep(0.7)  # Avoid flood
+                    await asyncio.sleep(0.1)  # Avoid flood
                 except Exception:
                     pass
     except Exception:
@@ -240,46 +764,59 @@ async def cancel_handler(event):
     
     if event.sender_id != OWNER_ID:
         return
-    
+    await delete_command_message(event)
     if tag_task:
         tag_task.cancel()
         tag_task = None
-        await event.edit("**Tagging cancelled.**")
+        tag = await event.reply("**Tagging cancelled.**")
         await asyncio.sleep(0.6)
-        await event.delete()
+        await tag.delete()
     else:
-        await event.edit("No tagging in progress.")
+        wow = await event.reply("No tagging in progress.")
         await asyncio.sleep(0.6)
-        await event.delete()
+        await wow.delete()
 
         # Global variable for spam task
 spam_task = None
 
-# Command: .spam <message> - auto spam message
-@client.on(events.NewMessage(pattern=r'^\.spam\s+(.+)$', func=lambda e: True))
+# Command: .spam <delay> <message> - auto spam message with custom delay
+@client.on(events.NewMessage(pattern=r'^\.spam\s+(\d+\.?\d*)\s+(.+)$', func=lambda e: True))
 async def spam_handler(event):
     global spam_task
     
     if event.sender_id != OWNER_ID:
         return
-    
+    await delete_command_message(event)
     if spam_task:
-        await event.reply("Spam already running. Use .stopspam to stop.")
+        spam = await event.reply("⚠️ Spam already running. Use `.stopspam` to stop.")
+        await asyncio.sleep(0.6)
+        await spam.delete()
         return
     
-    message_text = event.pattern_match.group(1)
+    # Extract delay time and message
+    delay_time = float(event.pattern_match.group(1))
+    message_text = event.pattern_match.group(2)
     
-    await event.reply("🚀 Spam started... Use .stopspam to stop")
+    # Validate delay time
+    if delay_time < 0.1:
+        ok = await event.reply("❌ Minimum delay is 0.1 seconds")
+        await asyncio.sleep(0.6)
+        await ok.delete()
+        return
+    
+    delay = await event.reply(f"🚀 Spam started (delay: {delay_time}s)... Use `.stopspam` to stop")
+    await asyncio.sleep(0.6)
+    await delay.delete()
     
     # Start spam task
-    spam_task = asyncio.create_task(auto_spam(event.chat_id, message_text))
+    spam_task = asyncio.create_task(auto_spam(event.chat_id, message_text, delay_time))
 
-async def auto_spam(chat_id, message_text):
+async def auto_spam(chat_id, message_text, delay_time):
     global spam_task
     try:
         while True:
             await client.send_message(chat_id, message_text)
-            await asyncio.sleep(1)  # 1 second delay
+            await asyncio.sleep(delay_time)  # Custom delay time
     except Exception:
         pass
     finally:
@@ -292,14 +829,355 @@ async def stop_spam_handler(event):
     
     if event.sender_id != OWNER_ID:
         return
-    
+    await delete_command_message(event)
     if spam_task:
         spam_task.cancel()
         spam_task = None
-        await event.reply("🛑 Spam stopped.")
+        stop = await event.reply("🛑 Spam stopped.")
+        await asyncio.sleep(0.6)
+        await stop.delete()
     else:
-        await event.reply("❌ No spam running.")
+        no = await event.reply("❌ No spam running.")
+        await asyncio.sleep(0.6)
+        await no.delete()
 
+@client.on(events.NewMessage(pattern=r'^\.ban(?:\s+(@?\w+))?', outgoing=True))
+async def ban_cmd(event):
+    """Ban a user from the group"""
+    reply = await event.get_reply_message()
+    
+    # Get user from reply or from command
+    if reply:
+        user = await reply.get_sender()
+    else:
+        username = event.pattern_match.group(1)
+        if not username:
+            await event.edit("❌ **Usage:** `.ban <username>` or reply to user")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+        
+        try:
+            user = await client.get_entity(username)
+        except:
+            await event.edit("❌ **User not found!**")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+    
+    # Check if group
+    if not event.is_group:
+        await event.edit("❌ **This command works only in groups!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    try:
+        # Ban rights - can't send messages, media, etc.
+        banned_rights = ChatBannedRights(
+            until_date=None,
+            send_messages=True,
+            send_media=True,
+            send_stickers=True,
+            send_gifs=True,
+            send_games=True,
+            send_inline=True,
+            embed_links=True
+        )
+        
+        await client(EditBannedRequest(event.chat_id, user.id, banned_rights))
+        
+        # Get chat title
+        chat = await event.get_chat()
+        chat_title = chat.title or "Unknown Chat"
+        
+        # Create fancy response
+        response = f"""
+```╭━━━━⟬ 🔨 USER BANNED ⟭━━━━╮
+┃⟡➣ User: @{user.username if user.username else user.first_name}
+┃
+┃⟡➣ Chat: {chat_title}
+┃
+┃⟡➣ Status: Banned permanently
+╰━━━━━━━━━━━━━━━╯```
+        """
+        
+        await event.edit(response)
+        
+    except Exception as e:
+        await event.edit(f"❌ **Ban Error:** `{str(e)}`")
+        await asyncio.sleep(3)
+        await event.delete()
+
+# ============================================
+# UNBAN COMMAND
+# ============================================
+@client.on(events.NewMessage(pattern=r'^\.unban(?:\s+(@?\w+))?', outgoing=True))
+async def unban_cmd(event):
+    """Unban a user from the group"""
+    reply = await event.get_reply_message()
+    
+    # Get user from reply or from command
+    if reply:
+        user = await reply.get_sender()
+    else:
+        username = event.pattern_match.group(1)
+        if not username:
+            await event.edit("❌ **Usage:** `.unban <username>` or reply to user")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+        
+        try:
+            user = await client.get_entity(username)
+        except:
+            await event.edit("❌ **User not found!**")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+    
+    if not event.is_group:
+        await event.edit("❌ **This command works only in groups!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    try:
+        # Unban rights - remove all restrictions
+        unban_rights = ChatBannedRights(
+            until_date=None,
+            send_messages=False,
+            send_media=False,
+            send_stickers=False,
+            send_gifs=False,
+            send_games=False,
+            send_inline=False,
+            embed_links=False
+        )
+        
+        await client(EditBannedRequest(event.chat_id, user.id, unban_rights))
+        
+        # Get chat title
+        chat = await event.get_chat()
+        chat_title = chat.title or "Unknown Chat"
+        
+        response = f"""
+```╭━━━━⟬ ✅ USER UNBANNED ⟭━━━━╮
+┃⟡➣ User: @{user.username if user.username else user.first_name}
+┃
+┃⟡➣ Chat: {chat_title}
+┃        
+┃⟡➣ Status: Can send messages now
+╰━━━━━━━━━━━━━━━╯```
+        """
+        
+        await event.edit(response)
+        
+    except Exception as e:
+        await event.edit(f"❌ **Unban Error:** `{str(e)}`")
+        await asyncio.sleep(3)
+        await event.delete()
+
+# ============================================
+# MUTE COMMAND (with time)
+# ============================================
+@client.on(events.NewMessage(pattern=r'^\.mute(?:\s+(@?\w+))?(?:\s+(\d+))?', outgoing=True))
+async def mute_cmd(event):
+    """Mute a user in the group (optional time in minutes)"""
+    reply = await event.get_reply_message()
+    
+    # Parse arguments
+    args = event.pattern_match.group(1)
+    minutes = event.pattern_match.group(2)
+    
+    # Get user
+    if reply:
+        user = await reply.get_sender()
+        mute_time = int(minutes) if minutes else None
+    else:
+        if not args:
+            await event.edit("❌ **Usage:** `.mute @user [minutes]` or reply to user")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+        
+        parts = args.split()
+        username = parts[0]
+        mute_time = int(parts[1]) if len(parts) > 1 else None
+        
+        try:
+            user = await client.get_entity(username)
+        except:
+            await event.edit("❌ **User not found!**")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+    
+    if not event.is_group:
+        await event.edit("❌ **This command works only in groups!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    try:
+        # Set mute duration
+        if mute_time:
+            until_date = datetime.now() + timedelta(minutes=mute_time)
+            status = f"Muted for {mute_time} minute(s)"
+        else:
+            until_date = None
+            status = "Muted permanently (until unmute)"
+        
+        # Mute rights - can't send messages
+        muted_rights = ChatBannedRights(
+            until_date=until_date,
+            send_messages=True
+        )
+        
+        await client(EditBannedRequest(event.chat_id, user.id, muted_rights))
+        
+        # Get chat title
+        chat = await event.get_chat()
+        chat_title = chat.title or "Unknown Chat"
+        
+        response = f"""
+```╭━━━━⟬ 🔇 USER MUTED ⟭━━━━╮
+┃⟡➣ User: @{user.username if user.username else user.first_name}
+┃
+┃⟡➣ Chat: {chat_title}
+┃
+┃⟡➣ Status: {status}
+╰━━━━━━━━━━━━━━━╯```
+        """
+        
+        await event.edit(response)
+        
+    except Exception as e:
+        await event.edit(f"❌ **Mute Error:** `{str(e)}`")
+        await asyncio.sleep(3)
+        await event.delete()
+
+# ============================================
+# UNMUTE COMMAND
+# ============================================
+@client.on(events.NewMessage(pattern=r'^\.unmute(?:\s+(@?\w+))?', outgoing=True))
+async def unmute_cmd(event):
+    """Unmute a user in the group"""
+    reply = await event.get_reply_message()
+    
+    # Get user
+    if reply:
+        user = await reply.get_sender()
+    else:
+        username = event.pattern_match.group(1)
+        if not username:
+            await event.edit("❌ **Usage:** `.unmute @user` or reply to user")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+        
+        try:
+            user = await client.get_entity(username)
+        except:
+            await event.edit("❌ **User not found!**")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+    
+    if not event.is_group:
+        await event.edit("❌ **This command works only in groups!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    try:
+        # Unmute rights
+        unmute_rights = ChatBannedRights(
+            until_date=None,
+            send_messages=False
+        )
+        
+        await client(EditBannedRequest(event.chat_id, user.id, unmute_rights))
+        
+        # Get chat title
+        chat = await event.get_chat()
+        chat_title = chat.title or "Unknown Chat"
+        
+        response = f"""
+```╭━━━━⟬ 🔊 USER UNMUTED ⟭━━━━╮
+┃⟡➣ User: @{user.username if user.username else user.first_name}
+┃
+┃⟡➣ Chat: {chat_title}
+┃
+┃⟡➣ Status: Can send messages now
+╰━━━━━━━━━━━━━━━╯```
+        """
+        
+        await event.edit(response)
+        
+    except Exception as e:
+        await event.edit(f"❌ **Unmute Error:** `{str(e)}`")
+        await asyncio.sleep(3)
+        await event.delete()
+
+# ============================================
+# KICK COMMAND
+# ============================================
+@client.on(events.NewMessage(pattern=r'^\.kick(?:\s+(@?\w+))?', outgoing=True))
+async def kick_cmd(event):
+    """Kick a user from the group"""
+    reply = await event.get_reply_message()
+    
+    # Get user
+    if reply:
+        user = await reply.get_sender()
+    else:
+        username = event.pattern_match.group(1)
+        if not username:
+            await event.edit("❌ **Usage:** `.kick @user` or reply to user")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+        
+        try:
+            user = await client.get_entity(username)
+        except:
+            await event.edit("❌ **User not found!**")
+            await asyncio.sleep(3)
+            await event.delete()
+            return
+    
+    if not event.is_group:
+        await event.edit("❌ **This command works only in groups!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    try:
+        # Kick user
+        await client.kick_participant(event.chat_id, user.id)
+        
+        # Get chat title
+        chat = await event.get_chat()
+        chat_title = chat.title or "Unknown Chat"
+        
+        response = f"""
+```╭━━━━⟬ 👢 USER KICKED ⟭━━━━╮
+┃⟡➣ User: @{user.username if user.username else user.first_name}
+┃
+┃⟡➣ Chat: {chat_title}
+┃
+┃⟡➣ Status: Removed from group
+╰━━━━━━━━━━━━━━━╯```
+        """
+        
+        await event.edit(response)
+        
+    except Exception as e:
+        await event.edit(f"❌ **Kick Error:** `{str(e)}`")
+        await asyncio.sleep(3)
+        await event.delete()
+        
         # Command: .purge - delete messages from replied message to current
 @client.on(events.NewMessage(pattern=r'^\.purge(?:\s|$)', func=lambda e: True))
 async def purge_handler(event):
@@ -307,7 +1185,9 @@ async def purge_handler(event):
         return
     
     if not event.is_reply:
-        await event.reply("❌ Reply to a message to start purge from there.")
+        await event.edit("❌ Reply to a message to start purge from there.")
+        await asyncio.sleep(0.6)
+        await event.delete()
         return
     
     try:
@@ -340,13 +1220,1037 @@ async def purge_handler(event):
         
     except Exception as e:
         await event.reply(f"❌ Error during purge: {str(e)}")
+        
+import os
+import re
+import aiohttp
+import asyncio
+import yt_dlp
+from datetime import datetime
+from telethon import events
+
+# Required installations:
+# pip install yt-dlp aiohttp
+
+@client.on(events.NewMessage(pattern=r"\.dl(?: |$)(.*)"))
+async def media_downloader(event):
+    """Universal media downloader for Instagram, YouTube, Terabox"""
+    if event.sender_id != OWNER_ID:
+        return
+    
+    await delete_command_message(event)
+    
+    url = event.pattern_match.group(1).strip()
+    
+    if not url:
+        await event.reply("**Usage:** `.dl <url>`\n\n**Supported:**\n• YouTube\n• Instagram\n• Terabox")
+        return
+    
+    # Check URL type
+    if "youtube.com" in url or "youtu.be" in url:
+        await download_youtube(event, url)
+    elif "instagram.com" in url or "instagr.am" in url:
+        await download_instagram(event, url)
+    elif "terabox" in url or "4funbox" in url or "1024tera" in url:
+        await download_terabox(event, url)
+    else:
+        await event.reply("❌ Unsupported URL. Only YouTube, Instagram, and Terabox are supported.")
+
+async def download_youtube(event, url):
+    """Download YouTube videos"""
+    msg = await event.reply("📥 **Downloading YouTube video...**")
+    
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': 'downloads/%(title)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+        'noplaylist': True,
+        'progress_hooks': [lambda d: progress_hook(d, msg)],
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # Get video info
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Unknown')
+            
+            # Send info first
+            info_msg = f"🎬 **YouTube Video**\n"
+            info_msg += f"📌 **Title:** {title}\n"
+            info_msg += f"⏱️ **Duration:** {duration//60}:{duration%60:02d}\n"
+            info_msg += f"👤 **Channel:** {uploader}\n"
+            info_msg += f"⬇️ **Downloading...**"
+            
+            await msg.edit(info_msg)
+            
+            # Download video
+            ydl.download([url])
+            
+            # Find downloaded file
+            filename = ydl.prepare_filename(info)
+            
+            # Check if file exists
+            if os.path.exists(filename):
+                # Check file size (Telegram limit: 2GB for premium, 2GB for normal)
+                file_size = os.path.getsize(filename)
+                
+                if file_size > 2000 * 1024 * 1024:  # 2GB limit
+                    await msg.edit("❌ File size exceeds 2GB limit. Trying to download lower quality...")
+                    
+                    # Try lower quality
+                    ydl_opts['format'] = 'best[filesize<2G]'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        ydl2.download([url])
+                        filename = ydl2.prepare_filename(info)
+                
+                # Send video
+                await event.client.send_file(
+                    event.chat_id,
+                    filename,
+                    caption=f"🎬 **{title}**\n **✨ POWERED BY NEXUS USERBOT**\n **🌟 OWNER - @swaha01 & @shdxmr**",
+                    supports_streaming=True,
+                    progress_callback=lambda current, total: upload_progress(current, total, msg, title)
+                )
+                
+                await msg.delete()
+                
+                # Clean up
+                try:
+                    os.remove(filename)
+                except:
+                    pass
+            else:
+                await msg.edit("❌ Failed to download video.")
+                
+    except Exception as e:
+        await msg.edit(f"❌ YouTube Error: {str(e)}")
+
+async def download_instagram(event, url):
+    """Download Instagram posts, reels, stories"""
+    msg = await event.reply("📸 **Downloading Instagram media...**")
+    
+    # Check if it's a story
+    is_story = "/stories/" in url
+    
+    ydl_opts = {
+        'outtmpl': 'downloads/%(title)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            if 'entries' in info:  # Multiple items (carousel)
+                entries = list(info['entries'])
+                total = len(entries)
+                
+                await msg.edit(f"📸 **Instagram Carousel**\n📊 **Posts:** {total}\n⬇️ **Downloading...**")
+                
+                for i, entry in enumerate(entries, 1):
+                    if entry.get('url'):
+                        media_url = entry['url']
+                        # Download and send each media
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(media_url) as resp:
+                                if resp.status == 200:
+                                    content = await resp.read()
+                                    
+                                    # Determine file type
+                                    content_type = resp.headers.get('Content-Type', '')
+                                    ext = '.mp4' if 'video' in content_type else '.jpg'
+                                    filename = f"downloads/insta_{i}{ext}"
+                                    
+                                    with open(filename, 'wb') as f:
+                                        f.write(content)
+                                    
+                                    # Send file
+                                    await event.client.send_file(
+                                        event.chat_id,
+                                        filename,
+                                        caption=f"📸 Instagram Post {i}/{total}",
+                                        reply_to=event.message if i == 1 else None
+                                    )
+                                    
+                                    # Clean up
+                                    try:
+                                        os.remove(filename)
+                                    except:
+                                        pass
+                                    
+                                    await asyncio.sleep(1)
+                
+                await msg.delete()
+                
+            else:  # Single media
+                title = info.get('title', 'Instagram Media')
+                uploader = info.get('uploader', 'Unknown')
+                
+                await msg.edit(f"📸 **Instagram Post**\n📌 **By:** {uploader}\n⬇️ **Downloading...**")
+                
+                # Download the media
+                ydl.download([url])
+                
+                # Find downloaded file
+                filename = ydl.prepare_filename(info)
+                
+                if os.path.exists(filename):
+                    # Check if it's video or image
+                    is_video = filename.endswith(('.mp4', '.mkv', '.webm'))
+                    
+                    await event.client.send_file(
+                        event.chat_id,
+                        filename,
+                        caption=f"📸 **Instagram {'Reel' if is_video else 'Post'}\n **✨ POWERED BY NEXUS USERBOT**\n **🌟 OWNER - @swaha01 & @shdxmr**",
+                        supports_streaming=True if is_video else False,
+                        progress_callback=lambda current, total: upload_progress(current, total, msg, title)
+                    )
+                    
+                    await msg.delete()
+                    
+                    # Clean up
+                    try:
+                        os.remove(filename)
+                    except:
+                        pass
+                else:
+                    await msg.edit("❌ Failed to download Instagram media.")
+    
+    except Exception as e:
+        await msg.edit(f"❌ Instagram Error: {str(e)}")
+
+async def download_terabox(event, url):
+    """Download from Terabox"""
+    msg = await event.reply("📦 **Processing Terabox link...**")
+    
+    try:
+        # Extract file ID from URL
+        pattern = r'terabox\.(?:app|com)/(?:s/|sharing/)?([a-zA-Z0-9_-]+)'
+        match = re.search(pattern, url)
+        
+        if not match:
+            await msg.edit("❌ Invalid Terabox URL.")
+            return
+        
+        file_id = match.group(1)
+        
+        # Terabox API endpoint (Note: This might change)
+        api_url = f"https://www.terabox.com/api/shorturlinfo?shorturl={file_id}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            # Get file info
+            async with session.get(api_url, headers=headers) as resp:
+                if resp.status != 200:
+                    await msg.edit("❌ Failed to fetch Terabox info.")
+                    return
+                
+                data = await resp.json()
+                
+                if data.get('errno') != 0:
+                    await msg.edit("❌ Invalid or expired link.")
+                    return
+                
+                file_info = data.get('list', [{}])[0]
+                file_name = file_info.get('server_filename', 'Unknown')
+                file_size = file_info.get('size', 0)
+                direct_link = file_info.get('dlink', '')
+                
+                if not direct_link:
+                    await msg.edit("❌ No download link found.")
+                    return
+                
+                # Convert size to readable format
+                size_mb = file_size / (1024 * 1024)
+                
+                info_msg = f"📦 **Terabox File**\n"
+                info_msg += f"📄 **Name:** {file_name}\n"
+                info_msg += f"📊 **Size:** {size_mb:.2f} MB\n"
+                info_msg += f"⬇️ **Downloading...**"
+                
+                await msg.edit(info_msg)
+                
+                # Download file
+                download_path = f"downloads/{file_name}"
+                
+                async with session.get(direct_link, headers=headers) as download_resp:
+                    if download_resp.status == 200:
+                        total_size = int(download_resp.headers.get('Content-Length', 0))
+                        
+                        with open(download_path, 'wb') as f:
+                            downloaded = 0
+                            async for chunk in download_resp.content.iter_chunked(1024*1024):  # 1MB chunks
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    
+                                    # Update progress every 5MB
+                                    if downloaded % (5*1024*1024) < 1024*1024:
+                                        percent = (downloaded / total_size) * 100 if total_size > 0 else 0
+                                        await msg.edit(f"{info_msg}\n📥 **Progress:** {percent:.1f}%")
+                        
+                        # Send file
+                        await event.client.send_file(
+                            event.chat_id,
+                            download_path,
+                            caption=f"📦 **{file_name}**\n💾 {size_mb:.2f} MB",
+                            progress_callback=lambda current, total: upload_progress(current, total, msg, file_name)
+                        )
+                        
+                        await msg.delete()
+                        
+                        # Clean up
+                        try:
+                            os.remove(download_path)
+                        except:
+                            pass
+                    else:
+                        await msg.edit("❌ Failed to download file.")
+    
+    except Exception as e:
+        await msg.edit(f"❌ Terabox Error: {str(e)}")
+
+def progress_hook(d, msg):
+    """Progress hook for yt-dlp"""
+    if d['status'] == 'downloading':
+        percent = d.get('_percent_str', '0%').strip()
+        speed = d.get('_speed_str', 'N/A')
+        eta = d.get('_eta_str', 'N/A')
+        
+        asyncio.create_task(
+            msg.edit(f"📥 **Downloading...**\n📊 **Progress:** {percent}\n🚀 **Speed:** {speed}\n⏳ **ETA:** {eta}")
+        )
+
+async def upload_progress(current, total, msg, filename):
+    """Upload progress callback"""
+    percent = (current / total) * 100 if total > 0 else 0
+    
+    # Update every 5% progress
+    if int(percent) % 5 == 0:
+        try:
+            await msg.edit(
+                f"📤 **Uploading...**\n"
+                f"📄 **File:** {filename[:30]}...\n"
+                f"📊 **Progress:** {percent:.1f}%\n"
+                f"💾 **Size:** {current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB"
+            )
+        except:
+            pass
+        
+@client.on(events.NewMessage(pattern=r'\.delall(?:\s+(.+))?'))
+async def delete_all_messages(event):
+    """Delete all messages of a user in group"""
+    
+    if event.sender_id != OWNER_ID:
+        return
+    
+    # Check if in group
+    if not event.is_group:
+        await event.delete()  # Delete command
+        await event.reply("❌ This command works only in groups!", reply_to=event.id)
+        return
+    
+    # Check admin permissions
+    try:
+        participant = await event.client.get_permissions(event.chat_id, event.sender_id)
+        if not (participant.is_admin or participant.is_creator):
+            await event.delete()  # Delete command
+            await event.reply("❌ You need to be admin to use this command!", reply_to=event.id)
+            return
+    except:
+        await event.delete()  # Delete command
+        await event.reply("❌ Could not check admin permissions!", reply_to=event.id)
+        return
+    
+    # Get target user
+    target_user = None
+    args = event.pattern_match.group(1)
+    
+    if event.is_reply:
+        # Case 1: Reply to user's message
+        reply_msg = await event.get_reply_message()
+        target_user = reply_msg.sender_id
+        
+    elif args and args.startswith('@'):
+        # Case 2: @username provided
+        try:
+            username = args[1:]  # Remove @
+            user = await event.client.get_entity(username)
+            target_user = user.id
+        except:
+            await event.delete()  # Delete command
+            await event.reply(f"❌ User @{username} not found!", reply_to=event.id)
+            return
+    
+    elif args and args.isdigit():
+        # Case 3: User ID provided
+        target_user = int(args)
+    
+    else:
+        await event.delete()  # Delete command
+        await event.reply(
+            "**Usage:**\n"
+            "1. `.delall` - Reply to user's message\n"
+            "2. `.delall @username` - Delete messages of @username\n"
+            "3. `.delall 123456789` - Delete messages by user ID",
+            reply_to=event.id
+        )
+        return
+    
+    # Get user info
+    try:
+        user_entity = await event.client.get_entity(target_user)
+        username = f"@{user_entity.username}" if user_entity.username else user_entity.first_name
+    except:
+        username = f"User {target_user}"
+    
+    # Delete the command message first
+    await event.delete()
+    
+    # Send initial reply
+    response_msg = await event.reply(f"🗑️ **Deleting all messages from {username}...**")
+    
+    deleted_count = 0
+    failed_count = 0
+    
+    try:
+        # Get all messages from user
+        async for message in event.client.iter_messages(
+            event.chat_id,
+            from_user=target_user
+        ):
+            try:
+                await message.delete()
+                deleted_count += 1
+                
+                # Delay to avoid flood
+                await asyncio.sleep(0.2)
+                
+            except:
+                failed_count += 1
+                continue
+            
+        await response_msg.delete()
+        
+        # Update final result
+        await response_msg.reply(
+            f"```✅ Deletion Complete!\n\n"
+            f"👤 User: {username}\n"
+            f"✅ Deleted: {deleted_count}\n"
+            f"❌ Failed: {failed_count}```"
+        )
+        
+    except Exception as e:
+        await response_msg.edit(f"❌ Error: {str(e)[:200]}")
+        
+STYLES = [
+    ("𓂃❛ ⟶", "❜ 🌙⤹🌸"), ("❍⏤●", "●───♫▷"),
+    ("🤍 ⍣⃪ ᶦ ᵃᵐ⛦⃕", "❛𝆺𝅥⤹࿗𓆪ꪾ™"),
+    ("𓆰𝅃🔥", "⃪⍣꯭꯭𓆪꯭🝐"),
+    ("◄❥❥⃝⃪⃕🦚⟵᷽᷍", "˚◡⃝🐬𔘓❁❍•:➛"),
+    ("➺꯭꯭꯭𝅥𝆬🦋─⃛┼", "🥵⃝⃝ᬽ⃪꯭➺꯭⎯⎯᪵᪳"),
+    ("◄⏤🝛꯭𝐈𝛕ᷟ𝚣⃪ꙴ🥀⃝⃪", "⃝☠️⎯꯭𓆩♡꧂"),
+    ("🦋⃟≛⃝⋆⋆≛⃞", "𝄟🦋⃟≛⃝≛"),
+    ("𐏓𓆩❤️🔥𓆪𝆺꯭𝅥༎ࠫ⛧", "ࠫ༎𝆺𝅥𓆩⍣꯭⃟🍷༎᪵⛧"),
+    ("𓄂𝆺𝅥⃝🥀𖥫꯭꯭𝆺꯭꯭𝅥", "𝆺꯭𝅥🎭🌹"),
+    ("𓄂─⃛𓆩🫧𝆺𝅥⃝𐏓", "㋛𓆪꯭⵿٭🍃"),
+    ("◄⏤⃪⃝⃪𐏓🝛꯭", "⸙ꠋꠋ⛦⃪⃪🝛꯭••➤"),
+    ("🎡𓆩᪵🌸⃝۫𝞄⃕𝖋𝖋꯭ᜊ𝆺𝅥⃝", "┼⃖ꭗ🦋¦🌺--🎋"),
+    ("⛦⃕𝄟•๋๋🦋⃟⃟⃟≛⃝💖", "🦋•๋๋𝄟"),
+    ("••ᯓ❥๋๋ꗝ༎꯭ࠫ🤍𝆺꯭𝅥", "𝆺꯭𝅥༎ࠫ◡⃝𑲭"),
+    ("𝐈𝛕ᷟ𝚣⃪ꙴ⋆†།┼⃖•🔥⃞⃪⃜", "🔥⃞⃪⃜𓆪🦋✿"),
+    ("❍─⃜𓆩〭〬🤍𓆪˹", ".⍣⃪ꭗ𝆺𝅥𔘓🪽"),
+    ("𝆺𝅥اـ꯭ـ꯭𝞂⃕𝝲𝝴꯭•⚚•𝆺꯭𝅥", "𝆺꯭𝅥ꀭ‧₊𝁾⟶🍃˚"),
+    ("◄⏤🔥⃝⃪🐼𓆩꯭❛", "❜꯭𓆪⎯⟶"),
+    ("❍─⃜𓆩〭〬👒𓆪⃪꯭", "🤍𝆺꯭𝅥⎯⎯"),
+    ("◄⏤❥≛⃝", "🍁⃝➤🕊⃝🝐"),
+    ("◄⏤🫧⃝⃪🦋", "◡⃝ا۬🌸𝆺꯭𝅥⎯꯭"),
+    ("◄ᯓ❥≛⃝🌸", "💗⃝꯭꯭❥꯭꯭✿꯭꯭࿐"),
+    ("𓆩💀⃝🖤☠️", "☠️🖤⃝💀𓆪"),
+    ("⛧⃝🔥𓆩👑", "👑𓆪⃪🔥⃝⛧"),
+    ("𓂀⃝🦋⛦⃕💫", "💫⛦⃪🦋⃝𓂀"),
+    ("𓆩⚡️⃝🔥💥", "💥🔥⃝⚡️𓆪"),
+    ("✦⃝💫𓆩🌌", "🌌𓆪⃪💫⃝✦"),
+    ("𓆩🍷⃝✨⛧", "⛧⃪✨⃝🍷𓆪"),
+    ("❛⃝🌑𓆩☠️", "☠️𓆪⃪🌑⃝❜"),
+    ("𓆩🎀⃝💖⛦", "⛦⃪💖⃝🎀𓆪"),
+    ("✧⃝🌺𓆩🦋", "🦋𓆪⃪🌺⃝✧"),
+    ("𓆩🔥⃝⚔️👑", "👑⚔️⃝🔥𓆪"),
+    ("◄⏤🌪⃝⃪💫", "💫⃝🌪⏤►"),
+    ("𓆩🕯⃝🌑☠️", "☠️🌑⃝🕯𓆪"),
+    ("⛦⃕⃝🔥𓆩💎", "💎𓆪⃪🔥⃝⛦⃕"),
+]
+
+
+def split_text(text, limit=3900):
+    parts = []
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(text[:cut])
+        text = text[cut:]
+    parts.append(text)
+    return parts
+
+@client.on(events.NewMessage(pattern=r"\.name(?: |$)(.*)"))
+async def name_handler(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
+    name = event.pattern_match.group(1).strip()
+
+    if not name:
+        name = await event.reply("❌ Use: `.name YourName`")
+        await asyncio.sleep(0.6)
+        await name.delete()
+        return
+
+    text = "✨ **Stylish Name Results** ✨\n\n"
+    for i, (l, r) in enumerate(STYLES, 1):
+        text += f"{i}. `{l} {name} {r}`\n"
+
+    for chunk in split_text(text):
+        await event.reply(chunk)
+
+        
+        #banned users set
+
+def load_gban_list():
+    """Load GBan list from JSON file"""
+    if os.path.exists(GBAN_FILE):
+        try:
+            with open(GBAN_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_gban_list(gban_list):
+    """Save GBan list to JSON file"""
+    with open(GBAN_FILE, 'w') as f:
+        json.dump(gban_list, f, indent=4, default=str)
+        
+
+def get_ban_rights(until_date=None):
+    """Get ban rights for a user"""
+    return ChatBannedRights(
+        until_date=until_date,
+        view_messages=True,
+        send_messages=True,
+        send_media=True,
+        send_stickers=True,
+        send_gifs=True,
+        send_games=True,
+        send_inline=True,
+        embed_links=True,
+    )
+
+def get_unban_rights():
+    """Get unban rights for a user"""
+    return ChatBannedRights(
+        until_date=None,
+        view_messages=False,
+        send_messages=False,
+        send_media=False,
+        send_stickers=False,
+        send_gifs=False,
+        send_games=False,
+        send_inline=False,
+        embed_links=False,
+    )
+
+def is_gbanned(user_id):
+    """Check if user is globally banned"""
+    gban_list = load_gban_list()
+    return str(user_id) in gban_list
+
+# ==================== HELPER FUNCTION ====================
+async def check_owner_only(event):
+    """Check if the command is used by OWNER_ID only"""
+    sender = await event.get_sender()
+    if sender.id != OWNER_ID:
+        await event.edit("🚫 **ACCESS DENIED**\n\nThis command can only be used by the **BOT OWNER**!")
+        return False
+    return True
+
+# ==================== AUTO-BAN HANDLER ====================
+async def auto_gban_check(event):
+    """Automatically ban GBanned users when they join/send messages"""
+    # Don't check if event is from private chat
+    if not event.is_group and not event.is_channel:
+        return
+    
+    # Don't check if sender is owner
+    sender = await event.get_sender()
+    if sender.id == OWNER_ID:
+        return
+    
+    # Check if sender is GBanned
+    if is_gbanned(sender.id):
+        try:
+            chat = await event.get_chat()
+            
+            # Ban the user
+            ban_rights = get_ban_rights(until_date=None)
+            
+            await event.client(EditBannedRequest(
+                chat.id,
+                sender.id,
+                ban_rights
+            ))
+            
+            # Delete the message
+            await event.delete()
+            
+            # Send notification to owner
+            try:
+                await event.client.send_message(
+                    OWNER_ID,
+                    f"🚨 **Auto-Banned GBanned User**\n\n"
+                    f"👤 User: {sender.first_name or 'Unknown'}\n"
+                    f"🆔 ID: `{sender.id}`\n"
+                    f"💬 Chat: {chat.title or 'Unknown'}\n"
+                    f"🆔 Chat ID: `{chat.id}`"
+                )
+            except:
+                pass
+            
+            logger.info(f"Auto-banned GBanned user {sender.id} from chat {chat.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to auto-ban user {sender.id}: {str(e)}")
+
+# Auto-ban handler
+@client.on(events.NewMessage())
+async def auto_ban_handler(event):
+    await auto_gban_check(event)
+
+# ==================== .GBAN COMMAND ====================
+@client.on(events.NewMessage(pattern=r'^\.gban(?:\s+(\d+)(?:d|h|m)?)?(?:\s+(.*))?$', outgoing=True))
+async def global_ban_command(event):
+    """Globally ban a user from all groups (OWNER ONLY)"""
+    
+    # STRICT OWNER CHECK
+    if not await check_owner_only(event):
+        return
+    
+    # Check usage
+    if not event.is_reply and not event.pattern_match.group(2):
+        await event.edit("""
+**🌍 GLOBAL BAN COMMAND (OWNER ONLY)**
+
+**Usage:**
+`.gban` - Reply to user (permanent)
+`.gban [duration] [reason]` - Reply to user with duration
+`.gban [user_id] [duration] [reason]` - Ban by user ID
+
+**⏰ Duration Formats:**
+- `7d` = 7 days
+- `2h` = 2 hours
+- `30m` = 30 minutes
+- `permanent` = Permanent ban
+
+**📝 Examples:**
+`.gban` - Permanent (reply to user)
+`.gban 7d Spamming` - 7 days (reply to user)
+`.gban 123456789 30m Flooding` - Ban by ID
+        """)
+        return
+    
+    try:
+        # Get target user
+        if event.is_reply:
+            reply_msg = await event.get_reply_message()
+            target_user_id = reply_msg.sender_id
+            user_entity = await event.client.get_entity(target_user_id)
+        else:
+            # Parse arguments
+            args = event.text.split(maxsplit=3)
+            if len(args) < 2:
+                await event.edit("`Please provide a user ID!`")
+                return
+            
+            try:
+                target_user_id = int(args[1])
+                user_entity = await event.client.get_entity(target_user_id)
+            except ValueError:
+                await event.edit("`Invalid user ID format!`")
+                return
+            except Exception as e:
+                await event.edit(f"`Failed to fetch user: {str(e)}`")
+                return
+        
+        # Prevent banning owner
+        if user_entity.id == OWNER_ID:
+            await event.edit("🤦‍♂️ **You cannot ban yourself (Owner)!**")
+            return
+        
+        # Get duration and reason
+        duration_match = event.pattern_match.group(1)
+        reason_match = event.pattern_match.group(2)
+        
+        # Parse duration
+        until_date = None
+        duration_text = "Permanent"
+        
+        if duration_match:
+            if 'permanent' in duration_match.lower():
+                duration_text = "Permanent"
+            else:
+                try:
+                    # Parse duration like 7d, 2h, 30m
+                    duration_str = duration_match
+                    if duration_str[-1].isalpha():
+                        num = int(duration_str[:-1])
+                        unit = duration_str[-1].lower()
+                    else:
+                        num = int(duration_str)
+                        unit = 'd'
+                    
+                    if unit == 'd':
+                        until_date = datetime.now() + timedelta(days=num)
+                        duration_text = f"{num} day(s)"
+                    elif unit == 'h':
+                        until_date = datetime.now() + timedelta(hours=num)
+                        duration_text = f"{num} hour(s)"
+                    elif unit == 'm':
+                        until_date = datetime.now() + timedelta(minutes=num)
+                        duration_text = f"{num} minute(s)"
+                    
+                except:
+                    # If duration parsing fails, treat as reason
+                    if not reason_match:
+                        reason_match = duration_match
+                    duration_text = "Permanent"
+        
+        # Get reason
+        reason = reason_match or "No reason provided"
+        
+        # Load GBan list
+        gban_list = load_gban_list()
+        
+        # Check if already GBanned
+        if str(user_entity.id) in gban_list:
+            await event.edit(f"⚠️ **User is already globally banned!**\n\nUse `.gunban {user_entity.id}` to remove ban first.")
+            return
+        
+        # Add to GBan list
+        gban_list[str(user_entity.id)] = {
+            "user_id": user_entity.id,
+            "first_name": user_entity.first_name or "",
+            "last_name": user_entity.last_name or "",
+            "username": user_entity.username or "",
+            "banned_by": OWNER_ID,
+            "banned_at": datetime.now().isoformat(),
+            "until": until_date.isoformat() if until_date else None,
+            "duration": duration_text,
+            "reason": reason,
+            "permanent": until_date is None
+        }
+        
+        save_gban_list(gban_list)
+        
+        # Start banning process
+        processing_msg = await event.edit(f"""
+🚫 **INITIATING GLOBAL BAN** 🚫
+
+**👤 Target User:** {user_entity.first_name or 'Unknown'}
+**🆔 User ID:** `{user_entity.id}`
+**⏰ Duration:** {duration_text}
+**📝 Reason:** {reason}
+**👑 Banned By:** OWNER
+
+**🔄 Scanning all groups...**
+**⏳ Please wait, this may take a minute...**
+        """)
+        
+        # Ban from all groups
+        banned_chats = []
+        failed_chats = []
+        total_checked = 0
+        
+        async for dialog in event.client.iter_dialogs():
+            if dialog.is_group or (dialog.is_channel and not dialog.is_user):
+                total_checked += 1
+                
+                try:
+                    # Check if bot is admin
+                    chat = await event.client.get_entity(dialog.id)
+                    
+                    # Get bot's permissions (checking if we can ban)
+                    try:
+                        me = await event.client.get_me()
+                        bot_permissions = await event.client.get_permissions(dialog.id, me.id)
+                        
+                        if bot_permissions.is_admin or bot_permissions.is_creator:
+                            # Ban user
+                            ban_rights = get_ban_rights(until_date=until_date)
+                            
+                            await event.client(EditBannedRequest(
+                                dialog.id,
+                                user_entity.id,
+                                ban_rights
+                            ))
+                            
+                            banned_chats.append(dialog.name or f"ID: {dialog.id}")
+                            
+                            # Update progress every 10 chats
+                            if len(banned_chats) % 10 == 0:
+                                await processing_msg.edit(f"""
+🚫 **GLOBAL BAN PROGRESS**
+
+**✅ Banned from:** {len(banned_chats)} chats
+**❌ Failed:** {len(failed_chats)} chats
+**📊 Total checked:** {total_checked} chats
+
+**🔄 Continuing scan...**
+                                """)
+                            
+                            await asyncio.sleep(0.2)  # Avoid flood
+                            
+                    except Exception as e:
+                        failed_chats.append(f"{dialog.name or dialog.id}")
+                        
+                except Exception:
+                    failed_chats.append(f"Chat {dialog.id}")
+        
+        # Final report
+        report_msg = f"""
+✅ **GLOBAL BAN COMPLETED SUCCESSFULLY** ✅
+
+**👤 User:** {user_entity.first_name or 'Unknown'}
+**🆔 ID:** `{user_entity.id}`
+**⏰ Duration:** {duration_text}
+**📝 Reason:** {reason}
+**📅 Banned On:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+**📊 STATISTICS:**
+├ ✅ **Successfully banned from:** {len(banned_chats)} chats
+├ ❌ **Failed to ban from:** {len(failed_chats)} chats
+├ 📈 **Total groups checked:** {total_checked}
+└ 💾 **Added to GBan database:** Yes
+
+**🔒 AUTO-BAN ENABLED:**
+This user will be automatically banned if they join any group where this bot is admin.
+        """
+        
+        await processing_msg.edit(report_msg)
+        
+        # Log to console
+        logger.info(f"[GBAN] User {user_entity.id} globally banned by OWNER. Reason: {reason}")
+        
+    except Exception as e:
+        await event.edit(f"❌ **GLOBAL BAN FAILED**\n\n**Error:** {str(e)}")
+        logger.error(f"[GBAN ERROR] {str(e)}")
+
+# ==================== .GUNBAN COMMAND ====================
+@client.on(events.NewMessage(pattern=r'^\.gunban(?:\s+(\d+))?$', outgoing=True))
+async def global_unban_command(event):
+    """Remove global ban from a user (OWNER ONLY)"""
+    
+    # STRICT OWNER CHECK
+    if not await check_owner_only(event):
+        return
+    
+    # Get target user
+    target_user_id = None
+    
+    if event.is_reply:
+        reply_msg = await event.get_reply_message()
+        target_user_id = reply_msg.sender_id
+    elif event.pattern_match.group(1):
+        target_user_id = int(event.pattern_match.group(1))
+    else:
+        await event.edit("""
+**🌍 GLOBAL UNBAN COMMAND (OWNER ONLY)**
+
+**Usage:**
+`.gunban` - Reply to user
+`.gunban [user_id]` - Unban by user ID
+
+**Examples:**
+`.gunban` - Reply to user
+`.gunban 123456789` - Unban by ID
+        """)
+        return
+    
+    try:
+        # Load GBan list
+        gban_list = load_gban_list()
+        
+        # Check if user is GBanned
+        if str(target_user_id) not in gban_list:
+            await event.edit(f"❌ **User `{target_user_id}` is not globally banned!**")
+            return
+        
+        # Get user info from GBan list
+        user_info = gban_list[str(target_user_id)]
+        
+        # Start unbanning process
+        processing_msg = await event.edit(f"""
+✅ **INITIATING GLOBAL UNBAN** ✅
+
+**👤 User:** {user_info.get('first_name', 'Unknown')}
+**🆔 ID:** `{target_user_id}`
+**📝 Original Reason:** {user_info.get('reason', 'Unknown')}
+**📅 Banned On:** {user_info.get('banned_at', 'Unknown')}
+
+**🔄 Scanning all groups to unban...**
+**⏳ Please wait...**
+        """)
+        
+        # Unban from all groups
+        unbanned_chats = []
+        failed_chats = []
+        total_checked = 0
+        
+        async for dialog in event.client.iter_dialogs():
+            if dialog.is_group or (dialog.is_channel and not dialog.is_user):
+                total_checked += 1
+                
+                try:
+                    # Check if bot is admin
+                    chat = await event.client.get_entity(dialog.id)
+                    
+                    # Get bot's permissions
+                    try:
+                        me = await event.client.get_me()
+                        bot_permissions = await event.client.get_permissions(dialog.id, me.id)
+                        
+                        if bot_permissions.is_admin or bot_permissions.is_creator:
+                            # Unban user
+                            unban_rights = get_unban_rights()
+                            
+                            await event.client(EditBannedRequest(
+                                dialog.id,
+                                target_user_id,
+                                unban_rights
+                            ))
+                            
+                            unbanned_chats.append(dialog.name or f"ID: {dialog.id}")
+                            
+                            # Update progress
+                            if len(unbanned_chats) % 10 == 0:
+                                await processing_msg.edit(f"""
+✅ **GLOBAL UNBAN PROGRESS**
+
+**✅ Unbanned from:** {len(unbanned_chats)} chats
+**❌ Failed:** {len(failed_chats)} chats
+**📊 Total checked:** {total_checked} chats
+
+**🔄 Continuing...**
+                                """)
+                            
+                            await asyncio.sleep(0.2)
+                            
+                    except Exception:
+                        failed_chats.append(f"{dialog.name or dialog.id}")
+                        
+                except Exception:
+                    failed_chats.append(f"Chat {dialog.id}")
+        
+        # Remove from GBan list
+        del gban_list[str(target_user_id)]
+        save_gban_list(gban_list)
+        
+        # Final report
+        report_msg = f"""
+✅ **GLOBAL UNBAN COMPLETED SUCCESSFULLY** ✅
+
+**👤 User:** {user_info.get('first_name', 'Unknown')}
+**🆔 ID:** `{target_user_id}`
+**📅 Unbanned On:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+**📊 STATISTICS:**
+├ ✅ **Successfully unbanned from:** {len(unbanned_chats)} chats
+├ ❌ **Failed to unban from:** {len(failed_chats)} chats
+├ 📈 **Total groups checked:** {total_checked}
+└ 🗑️ **Removed from GBan database:** Yes
+
+**🔓 AUTO-BAN DISABLED:**
+This user can now join groups freely.
+        """
+        
+        await processing_msg.edit(report_msg)
+        
+        # Log to console
+        logger.info(f"[GUNBAN] User {target_user_id} globally unbanned by OWNER")
+        
+    except Exception as e:
+        await event.edit(f"❌ **GLOBAL UNBAN FAILED**\n\n**Error:** {str(e)}")
+        logger.error(f"[GUNBAN ERROR] {str(e)}")
+
+# ==================== .GBANLIST COMMAND ====================
+@client.on(events.NewMessage(pattern=r'^\.gbanlist$', outgoing=True))
+async def gban_list_command(event):
+    """Show list of all globally banned users (OWNER ONLY)"""
+    
+    # STRICT OWNER CHECK
+    if not await check_owner_only(event):
+        return
+    
+    try:
+        # Load GBan list
+        gban_list = load_gban_list()
+        
+        if not gban_list:
+            await event.edit("📭 **GBan list is empty!**\n\nNo users are globally banned.")
+            return
+        
+        total_banned = len(gban_list)
+        
+        # Create formatted list
+        ban_list_text = f"📋 **GLOBAL BAN LIST** 📋\n\n"
+        ban_list_text += f"**Total Banned Users:** {total_banned}\n\n"
+        ban_list_text += "─" * 30 + "\n\n"
+        
+        for idx, (user_id, user_data) in enumerate(gban_list.items(), 1):
+            user_name = user_data.get('first_name', 'Unknown')
+            username = f"@{user_data.get('username')}" if user_data.get('username') else "No username"
+            reason = user_data.get('reason', 'No reason')
+            banned_on = user_data.get('banned_at', 'Unknown')
+            duration = user_data.get('duration', 'Permanent')
+            
+            ban_list_text += f"**{idx}. {user_name}**\n"
+            ban_list_text += f"   ├ 🆔 ID: `{user_id}`\n"
+            ban_list_text += f"   ├ 👤 Username: {username}\n"
+            ban_list_text += f"   ├ ⏰ Duration: {duration}\n"
+            ban_list_text += f"   ├ 📝 Reason: {reason[:50]}...\n"
+            ban_list_text += f"   └ 📅 Banned: {banned_on[:10]}\n\n"
+            
+            # Limit to 15 users per message
+            if idx == 15:
+                ban_list_text += f"**... and {total_banned - 15} more users**\n"
+                break
+        
+        ban_list_text += f"\n**Use:** `.gunban [user_id]` to remove ban"
+        
+        await event.edit(ban_list_text)
+        
+    except Exception as e:
+        await event.edit(f"❌ **Failed to load GBan list:** {str(e)}")
+        
 from telethon import events
 import requests, json
 
 @client.on(events.NewMessage(pattern=r'\.num (\d+)'))
 async def number_info(event):
+    if event.sender_id != OWNER_ID:
+        return
+   
     num = event.pattern_match.group(1)
-    api = f"https://number-to-information.vercel.app/fetch?key=NO-LOVE&num={num}"
+    api = f"https://abbas-number-info.vercel.app/track?num={num}"
     try:
         data = requests.get(api).json()
         await event.reply(f"📱 Number Info:\n```{json.dumps(data, indent=2)}```")
@@ -355,8 +2259,11 @@ async def number_info(event):
 
 @client.on(events.NewMessage(pattern=r'\.vehicle (\S+)'))
 async def vehicle_info(event):
+    if event.sender_id != OWNER_ID:
+        return
+  
     vehicle_no = event.pattern_match.group(1)
-    api = f"https://vehicle-2-info.vercel.app/rose-x?vehicle_no={vehicle_no}"
+    api = f"https://vehicle-5-api.vercel.app/vehicle_info?vehicle_no={vehicle_no}"
     try:
         data = requests.get(api).json()
         await event.reply(f"🚗 Vehicle Info:\n```{json.dumps(data, indent=2)}```")
@@ -365,6 +2272,9 @@ async def vehicle_info(event):
 
 @client.on(events.NewMessage(pattern=r'\.aadhar (\d{12})'))
 async def aadhar_info(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
     aadhaar = event.pattern_match.group(1)
     api = f"https://rose-x-tool.vercel.app/fetch?key=@Ros3_x&aadhaar={aadhaar}"
     try:
@@ -372,20 +2282,79 @@ async def aadhar_info(event):
         await event.reply(f"🪪 Aadhaar Info:\n```{json.dumps(data, indent=2)}```")
     except Exception as e:
         await event.reply(f"❌ Error: {e}")
+        
+@client.on(events.NewMessage(pattern=r'\.pin (\d{6})'))
+async def pin_info(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
+    pincode = event.pattern_match.group(1)
+    api = f"https://pin-code-2-village.vercel.app/?pin={pincode}"
+    try:
+        data = requests.get(api).json()
+        
+        # Convert the data to a pretty-printed JSON string[citation:1][citation:6][citation:7]
+        json_str = json.dumps(data, indent=2)
+        # Split the string into individual lines[citation:3]
+        all_lines = json_str.split('\n')
+        
+        # Get only the last 15 lines
+        num_lines_to_show = 15
+        if len(all_lines) > num_lines_to_show:
+            lines_to_send = all_lines[-num_lines_to_show:]
+            message_body = '\n'.join(lines_to_send)
+        else:
+            # If the JSON has 15 or fewer lines, send all of them
+            message_body = json_str
+        
+        await event.reply(f"📮 Pincode Info:\n```{message_body}```")
+    except Exception as e:
+        await event.reply(f"❌ Error: {e}")
+
+@client.on(events.NewMessage(pattern=r'\.ip (\S+)'))
+async def ip_info(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
+    ip_address = event.pattern_match.group(1)
+    api = f"https://ip-address-api-fawn.vercel.app/ipinfo?ip={ip_address}"
+    try:
+        data = requests.get(api).json()
+        await event.reply(f"🌐 IP Info:\n```{json.dumps(data, indent=2)}```")
+    except Exception as e:
+        await event.reply(f"❌ Error: {e}")
+        
+@client.on(events.NewMessage(pattern=r'\.vnum (\S+)'))
+async def vnum_info(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
+    vehicle_no = event.pattern_match.group(1)
+    api = f"https://vehicle-to-own-num.vercel.app/vehicle?owner={vehicle_no}"
+    try:
+        data = requests.get(api).json()
+        await event.reply(f"🌐 vehicle Info:\n```{json.dumps(data, indent=2)}```")
+    except Exception as e:
+        await event.reply(f"❌ Error: {e}")
         # ------------------------------
 # GOOGLE SEARCH CONFIG
 # ------------------------------
-GOOGLE_API_KEY = "AIzaSyBPnt16fUVxu78zWOdVmYhiByj-hooPL2U"           # yaha api key
-CX_ID = "52a3d9bf39f3b4594"                      # tera CX ID
+GOOGLE_API_KEY = "AIzaSyBPnt16fUVxu78zWOdVmYhiByj-hooPL2U"           
+CX_ID = "52a3d9bf39f3b4594"       
 
 # ------------------------------
 # SEARCH COMMAND
 # ------------------------------
 @client.on(events.NewMessage(pattern=r"\.search (.+)"))
 async def search_google(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
     query = event.pattern_match.group(1)
 
-    await event.reply("🔎 Searching… for results wait…")
+    search = await event.reply("**🔎 Searching… for results wait…**")
+    await asyncio.sleep(0.8)
+    await search.delete()
 
     url = (
         f"https://www.googleapis.com/customsearch/v1?"
@@ -406,33 +2375,74 @@ async def search_google(event):
         return
 
     if "items" not in data:
-        await event.reply("😕 Koi result nahi mila.")
+        await event.reply("**😕 Koi result nahi mila.**")
         return
 
     results = data["items"][:3]
 
     msg = f"🔍 **Search results for:** `{query}`\n\n"
 
-    for item in results:
+    for idx, item in enumerate(results, 1):
         title = item.get("title", "No Title")
         desc = item.get("snippet", "No description available")
         link = item.get("link", "")
 
-        msg += f"🟢 **{title}**\n📄 {desc}\n🔗 {link}\n\n"
+        msg += f"**{idx}. {title}**\n📄 {desc}\n🔗 {link}\n\n"
 
+    # Image extract karna
     image_url = None
     try:
         for item in results:
             if "pagemap" in item and "cse_image" in item["pagemap"]:
                 image_url = item["pagemap"]["cse_image"][0]["src"]
                 break
+            elif "pagemap" in item and "cse_thumbnail" in item["pagemap"]:
+                image_url = item["pagemap"]["cse_thumbnail"][0]["src"]
+                break
     except:
         image_url = None
 
+    # Agar image URL mila hai to image ke sath message send karo
     if image_url:
-        await event.reply(msg)
+        try:
+            # Option 1: Direct URL se send karo (Telegram khud download karega)
+            await event.client.send_file(
+                event.chat_id,
+                file=image_url,
+                caption=msg[:1024] if len(msg) > 1024 else msg,
+                reply_to=event.message,
+                parse_mode='md'
+            )
+            
+        except Exception as e:
+            print(f"Image error: {e}")
+            # Option 2: Agar URL se nahi ho pa raha, to download karke send karo
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(image_url) as resp:
+                        if resp.status == 200:
+                            # Temporary file mein save karo
+                            image_data = await resp.read()
+                            
+                            # BytesIO use karke
+                            from io import BytesIO
+                            bio = BytesIO(image_data)
+                            bio.name = 'search_result.jpg'
+                            
+                            await event.client.send_file(
+                                event.chat_id,
+                                file=bio,
+                                caption=msg[:1024] if len(msg) > 1024 else msg,
+                                reply_to=event.message,
+                                parse_mode='md'
+                            )
+                        else:
+                            await event.reply(msg, parse_mode='md')
+            except Exception as e2:
+                print(f"Second image error: {e2}")
+                await event.reply(msg, parse_mode='md')
     else:
-        await event.reply(msg)
+        await event.reply(msg, parse_mode='md')
         
        # List of funny death messages with emojis
 death_messages = [
@@ -451,20 +2461,17 @@ kidnap_messages = [
     "👻 **{username} ko ghost kidnap kar ke le gaya!** 🌪️\n\n🏚️ Haunted mansion mein le jaya ja raha hai\n📱 Signal lost - tracking impossible!\n🍫 Chocolate ke badle chhod denge!",
     "🚁 **{username} ko helicopter se uthaya gaya!** 🪂\n\n🛩️ Destination: Unknown island\n🏝️ Luxury kidnapping package!\n📸 Instagram worthy kidnapping!"
 ]
- 
-OWNER_ID =8355551382   # ← Yaha aapka owner ID set hai
 
-@client.on(events.NewMessage(pattern='.kill'))
+@client.on(events.NewMessage(pattern=r'\.kill'))
 async def kill_command(event):
     """Kill command handler - Owner only"""
-    
-    # ❌ Non-owner → silent
+    # Check if user is owner
     if event.sender_id != OWNER_ID:
+        await event.reply("❌ **Ye command use krne ki aukat nhi h mittar 👺👺!** 🚫")
         return
-
-    # ❌ Not replying to anyone → friendly reminder
+    
     if not event.is_reply:
-        await event.reply("❗Target not locked. Reply to someone first!")
+        await event.reply("❌ **Kill karne ke liye kisi message par reply karein!**")
         return
     
     try:
@@ -473,28 +2480,26 @@ async def kill_command(event):
         
         username = f"@{user.username}" if user.username else user.first_name
         
-        # Random death message
+        # Select random death message
         death_message = random.choice(death_messages)
         formatted_message = death_message.format(username=username)
         
-        # Dramatic effect
-        message = await event.reply("🔫 Target Locking...")
-        await asyncio.sleep(1.8)
+        # Add some dramatic effects with message editing
+        message = await event.reply("🔫 Aiming...")
+        await asyncio.sleep(2)
         
-        await message.edit("💥 Missile Launching...")
-        await asyncio.sleep(1.8)
+        await message.edit("💥 Firing...")
+        await asyncio.sleep(2)
         
-        await message.edit("🎯 Target Hit!")
+        await message.edit("🎯 Target hit!")
         await asyncio.sleep(1)
-
+        
         await message.edit(formatted_message)
+        
+    except Exception as e:
+        await event.reply(f"❌ Kill failed! Error: {str(e)}")
 
-    except:
-        # Custom error message instead of traceback
-        await event.reply("⚠️ Operation Failed! Target Escaped 😶‍🌫️")
-
-
-@client.on(events.NewMessage(pattern='.kidnap'))
+@client.on(events.NewMessage(pattern=r'\.kidnap'))
 async def kidnap_command(event):
     """Kidnap command handler - Owner only"""
     # Check if user is owner
@@ -533,530 +2538,4317 @@ async def kidnap_command(event):
         
     except Exception as e:
         await event.reply(f"❌ Kidnap failed! Error: {str(e)}")
-        
-# SANGMATA BOTS FOR NAME HISTORY
-SANGMATA_BOTS = ["@SangMata_BOT", "@SangMata_beta_bot"]
 
+        
+@client.on(events.NewMessage(pattern=r"\.create\s+(.+)"))
+async def create_image(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
+    """Photo send karega, file nahi"""
+    try:
+        prompt = event.pattern_match.group(1).strip()
+        
+        if not prompt:
+            await event.reply("❌ Usage: `.create <prompt>`")
+            return
+        
+        msg = await event.reply(f"🔄 Creating...")
+        
+        api_url = f"https://text-to-img.apis-bj-devs.workers.dev/?prompt={requests.utils.quote(prompt)}"
+        
+        async with aiohttp.ClientSession() as session:
+            # JSON response lo
+            async with session.get(api_url) as resp:
+                if resp.status != 200:
+                    await msg.edit(f"❌ API error: {resp.status}")
+                    return
+                
+                data = await resp.json()
+                
+                if data.get('status') == 'success' and 'result' in data:
+                    # Pehli image URL
+                    image_url = data['result'][0]
+                    
+                    # Image download karo
+                    async with session.get(image_url) as img_resp:
+                        if img_resp.status != 200:
+                            await msg.edit("❌ Image download failed")
+                            return
+                        
+                        # IMPORTANT: Temporary file mein save karo
+                        import tempfile
+                        import os
+                        
+                        # Temporary file create karo
+                        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                            tmp.write(await img_resp.read())
+                            tmp_path = tmp.name
+                         
+                        try:
+                            # Photo as photo send karo (yeh important hai)
+                            await event.client.send_file(
+                                event.chat_id,
+                                tmp_path,  # File path
+                                caption=f"**Prompt:** `{prompt}`",
+                                reply_to=event.reply_to_msg_id if event.is_reply else None,
+                                force_document=False  # ❌ IMPORTANT: file nahi, photo bhejna
+                            )
+                        finally:
+                            # Temporary file delete karo
+                            os.unlink(tmp_path)
+                        
+                        await msg.delete()
+                else:
+                    await msg.edit(f"❌ Error: {data}")
+    
+    except Exception as e:
+        await event.edit(f"❌ Error: {str(e)}")
+
+
+# ========== .whois command ==========
+@client.on(events.NewMessage(pattern=r'^\.whois(?:\s|$)', func=lambda e: True))
+async def whois_command(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await asyncio.sleep(0.6)
+    await event.delete()
+    """Get user info with emojis and style"""
+    try:
+        # User identify karein
+        if event.is_reply:
+            reply_msg = await event.get_reply_message()
+            user = await reply_msg.get_sender()
+        else:
+            # Check if username/id provided
+            args = event.text.split(' ', 1)
+            if len(args) > 1:
+                user_arg = args[1].strip()
+                try:
+                    if user_arg.isdigit():
+                        user = await event.client.get_entity(int(user_arg))
+                    else:
+                        user_arg = user_arg.replace('@', '')
+                        user = await event.client.get_entity(user_arg)
+                except:
+                    reply = await event.reply("❌ User not found!")
+                    await asyncio.sleep(2)
+                    await reply.delete()
+                    return
+            else:
+                user = await event.get_sender()
+        
+        # User details collect karein
+        user_id = user.id
+        first_name = user.first_name or "N/A"
+        last_name = user.last_name or "N/A"
+        username = f"@{user.username}" if user.username else "No Username"
+        
+        # Check if bot
+        is_bot = "🤖 Yes" if hasattr(user, 'bot') and user.bot else "👤 No"
+        
+        # Check scam/fake
+        is_scam = "⚠️ Yes" if hasattr(user, 'scam') and user.scam else "✅ No"
+        is_fake = "⚠️ Yes" if hasattr(user, 'fake') and user.fake else "✅ No"
+        
+        # Premium check
+        is_premium = "🌟 Yes" if hasattr(user, 'premium') and user.premium else "💫 No"
+        
+        # DC ID get karein
+        dc_id = "N/A"
+        dc_location = "Unknown"
+        
+        if hasattr(user, 'photo') and user.photo:
+            # Photo se DC nikaalein
+            dc_id = getattr(user.photo, 'dc_id', "N/A")
+            
+            # DC location identify karein
+            dc_locations = {
+                1: "🇺🇸 North America (Miami)",
+                2: "🇳🇱 Europe (Amsterdam)",
+                3: "🇸🇬 Asia (Singapore)",
+                4: "🇦🇪 Middle East (Dubai)",
+                5: "🇸🇬 Singapore 2"
+            }
+            dc_location = dc_locations.get(dc_id, f"DC {dc_id}")
+        
+        # Last seen time
+        last_seen = "🕒 Recently"
+        if hasattr(user, 'status'):
+            if hasattr(user.status, 'was_online'):
+                last_seen = f"🕒 {user.status.was_online.strftime('%Y-%m-%d %H:%M')}"
+            elif user.status == 'UserStatusOnline':
+                last_seen = "🟢 Online Now"
+            elif user.status == 'UserStatusOffline':
+                last_seen = "⚫ Offline"
+            elif user.status == 'UserStatusRecently':
+                last_seen = "🟡 Recently"
+            elif user.status == 'UserStatusLastWeek':
+                last_seen = "🟠 Last Week"
+            elif user.status == 'UserStatusLastMonth':
+                last_seen = "🔴 Last Month"
+        
+        # Stylish response banayein
+        whois_text = f"""
+🔍 **━━━【 USER INFO 】━━━🔍**
+
+👤 **Name:** {first_name} {last_name}
+🆔 **ID:** `{user_id}`
+📛 **Username:** {username}
+🤖 **Bot:** {is_bot}
+🌟 **Premium:** {is_premium}
+
+📡 **━━━【 STATUS 】━━━📡**
+⏰ **Last Seen:** {last_seen}
+
+🛡️ **━━━【 VERIFICATION 】━━━🛡️**
+⚠️ **Scam:** {is_scam}
+🎭 **Fake:** {is_fake}
+
+🌐 **━━━【 DATA CENTER 】━━━🌐**
+🖥️ **DC ID:** {dc_id}
+📍 **Location:** {dc_location}
+
+✨ **━━━【 END 】━━━✨**
+        """
+        
+        # Photo ke saath send karein agar available ho
+        try:
+            # Method 1: Direct photo object use karein
+            try:
+                photos = await event.client.get_profile_photos(user, limit=1)
+                if photos and len(photos) > 0:
+                    await event.client.send_file(
+                        event.chat_id,
+                        photos[0],  # Direct photo object
+                        caption=whois_text,
+                        force_document=False  # YEH IMPORTANT HAI - Document nahi, photo send karega
+                    )
+                    return
+            except:
+                pass
+            
+            # Method 2: Download karke send karein
+            try:
+                photo_path = await event.client.download_profile_photo(user)
+                
+                if photo_path and os.path.exists(photo_path):
+                    await event.client.send_file(
+                        event.chat_id,
+                        photo_path,
+                        caption=whois_text,
+                        force_document=False  # YEH IMPORTANT HAI
+                    )
+                    # Temporary file delete karein
+                    try:
+                        os.remove(photo_path)
+                    except:
+                        pass
+                    return
+            except:
+                pass
+            
+            # Agar photo nahi mila toh sirf text
+            await event.reply(whois_text)
+            
+        except Exception as photo_error:
+            # Photo download fail ho toh sirf text
+            print(f"Photo error: {photo_error}")
+            await event.reply(whois_text)
+            
+    except Exception as e:
+        print(f"Whois error: {e}")
+        reply = await event.reply(f"❌ Error getting user info: {str(e)}")
+        await asyncio.sleep(2)
+        await reply.delete()
+
+# ========== DC ONLY COMMAND ==========
+@client.on(events.NewMessage(pattern=r'^\.dc(?:\s|$)', func=lambda e: True))
+async def dc_command(event):
+    """Get only DC info of user"""
+    try:
+        if event.is_reply:
+            reply_msg = await event.get_reply_message()
+            user = await reply_msg.get_sender()
+        else:
+            user = await event.get_sender()
+        
+        dc_id = "N/A"
+        dc_info = "Unknown"
+        
+        if hasattr(user, 'photo') and user.photo:
+            dc_id = getattr(user.photo, 'dc_id', "N/A")
+            
+            # DC details
+            dc_details = {
+                1: "**DC 1** - North America (Miami, USA)",
+                2: "**DC 2** - Europe (Amsterdam, Netherlands)",
+                3: "**DC 3** - Asia (Singapore)",
+                4: "**DC 4** - Middle East (Dubai, UAE)",
+                5: "**DC 5** - Singapore (Backup)"
+            }
+            
+            dc_info = dc_details.get(dc_id, f"**DC {dc_id}** - Unknown Location")
+        
+        # DC map emoji
+        dc_emoji = {
+            1: "🇺🇸",
+            2: "🇳🇱", 
+            3: "🇸🇬",
+            4: "🇦🇪",
+            5: "🇸🇬"
+        }.get(dc_id, "🌐")
+        
+        response = f"""
+{dc_emoji} **DATA CENTER INFO** {dc_emoji}
+
+👤 **User:** {user.first_name or 'N/A'}
+🆔 **User ID:** `{user.id}`
+
+🖥️ **DC ID:** `{dc_id}`
+📍 **Location Details:**
+{dc_info}
+
+📡 *DC = Data Center (Telegram Server Location)*
+        """
+        
+        await event.reply(response)
+        
+    except Exception as e:
+        await event.reply(f"❌ Error: {str(e)}")
+
+# ========== SIMPLE WHOIS WITH BETTER DC INFO ==========
+@client.on(events.NewMessage(pattern='^[.]info$'))
+async def simple_info(event):
+    """Simple user info command"""
+    try:
+        if event.is_reply:
+            reply = await event.get_reply_message()
+            user = await reply.get_sender()
+        else:
+            user = await event.get_sender()
+        
+        # Basic info
+        info_text = f"""
+📱 **User Information**
+
+**Name:** {user.first_name or ''} {user.last_name or ''}
+**ID:** `{user.id}`
+**Username:** @{user.username if user.username else 'No username'}
+**Bot:** {'✅ Yes' if user.bot else '❌ No'}
+**Verified:** {'✅ Yes' if user.verified else '❌ No'}
+**Scam:** {'⚠️ Yes' if user.scam else '✅ No'}
+**Fake:** {'⚠️ Yes' if user.fake else '✅ No'}
+**Premium:** {'🌟 Yes' if hasattr(user, 'premium') and user.premium else '💫 No'}
+        """
+        
+        # Try to get DC from photo
+        if hasattr(user, 'photo') and user.photo:
+            dc_id = user.photo.dc_id
+            dc_map = {
+                1: "🇺🇸 USA (Miami)",
+                2: "🇳🇱 Netherlands (Amsterdam)", 
+                3: "🇸🇬 Singapore",
+                4: "🇦🇪 UAE (Dubai)",
+                5: "🇸🇬 Singapore 2"
+            }
+            dc_text = dc_map.get(dc_id, f"DC {dc_id}")
+            info_text += f"\n**Data Center:** {dc_text}"
+        
+        await event.reply(info_text)
+        
+    except Exception as e:
+        await event.reply(f"❌ Error: {str(e)}")
+
+from telethon import events
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+import os
+import asyncio
+
+# ========== Auto save view-once media ==========
+@client.on(events.NewMessage())
+async def auto_save_view_once(event):
+    """Automatically save view-once media to saved messages"""
+    
+    try:
+        # Check if message has media
+        if not event.message.media:
+            return
+            
+        # Check if it's a view-once message
+        if hasattr(event.message, 'media') and event.message.media:
+            media = event.message.media
+            
+            # Check for view-once photo
+            if hasattr(media, 'ttl_seconds') and media.ttl_seconds and media.ttl_seconds > 0:
+                # Get sender info
+                sender = await event.get_sender()
+                sender_name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+                sender_username = f"@{sender.username}" if sender.username else "No username"
+                sender_id = sender.id
+                
+                # Get chat info
+                chat = await event.get_chat()
+                chat_title = chat.title if hasattr(chat, 'title') else "Private Chat"
+                chat_id = chat.id
+                
+                # Download the media
+                try:
+                    # Create caption with sender info
+                    caption = (
+                        f"📸 **Auto-saved View-Once Media**\n\n"
+                        f"👤 **Sender:** {sender_name}\n"
+                        f"📱 **Username:** {sender_username}\n"
+                        f"🆔 **User ID:** `{sender_id}`\n"
+                        f"💬 **Chat:** {chat_title}\n"
+                        f"🔢 **Chat ID:** `{chat_id}`\n"
+                        f"📅 **Date:** {event.message.date}\n"
+                        f"⏱️ **TTL:** {media.ttl_seconds} seconds"
+                    )
+                    
+                    # Download the media
+                    file_path = await event.message.download_media()
+                    
+                    # Send to saved messages
+                    if file_path:
+                        await client.send_file(
+                            'me',  # Send to saved messages
+                            file_path,
+                            caption=caption
+                        )
+                        
+                        # Delete the downloaded file
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            
+                        # Optional: Send confirmation in chat (uncomment if needed)
+                        # await event.reply("✅ View-once media saved to Saved Messages!")
+                        
+                except Exception as download_error:
+                    print(f"Download error: {download_error}")
+                    
+    except Exception as e:
+        print(f"Auto-save error: {e}")
+
+
+# ========== .save command (for manual save) ==========
+@client.on(events.NewMessage(pattern=r'^\.save(?:\s|$)', func=lambda e: True))
+async def save_command(event):
+    """Save view-once media (manual command)"""
+    if not event.is_reply:
+        await event.reply("❌ Reply to a view-once photo/video to save it!")
+        return
+    
+    try:
+        reply_msg = await event.get_reply_message()
+        
+        # Check if replied message has media with TTL
+        if not (reply_msg.media and hasattr(reply_msg.media, 'ttl_seconds') 
+                and reply_msg.media.ttl_seconds and reply_msg.media.ttl_seconds > 0):
+            await event.reply("❌ No view-once media found!")
+            return
+        
+        # Get sender info
+        sender = await reply_msg.get_sender()
+        sender_name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+        sender_username = f"@{sender.username}" if sender.username else "No username"
+        sender_id = sender.id
+        
+        # Get chat info
+        chat = await event.get_chat()
+        chat_title = chat.title if hasattr(chat, 'title') else "Private Chat"
+        chat_id = chat.id
+        
+        # Download the media
+        await event.reply("⏳ Downloading view-once media...")
+        
+        file_path = await reply_msg.download_media()
+        
+        if file_path:
+            # Create caption
+            caption = (
+                f"📸 **View-Once Media Saved**\n\n"
+                f"👤 **Sender:** {sender_name}\n"
+                f"📱 **Username:** {sender_username}\n"
+                f"🆔 **User ID:** `{sender_id}`\n"
+                f"💬 **Chat:** {chat_title}\n"
+                f"🔢 **Chat ID:** `{chat_id}`\n"
+                f"📅 **Date:** {reply_msg.date}\n"
+                f"⏱️ **TTL:** {reply_msg.media.ttl_seconds} seconds\n"
+                f"🔧 **Saved via:** `.save` command"
+            )
+            
+            # Send to saved messages
+            await client.send_file(
+                'me',
+                file_path,
+                caption=caption
+            )
+            
+            # Delete the downloaded file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            await event.reply("✅ View-once media saved to Saved Messages!")
+        else:
+            await event.reply("❌ Failed to download media!")
+            
+    except Exception as e:
+        await event.reply(f"❌ Error: {str(e)}")
+
+# ========== .zombie command ==========
+@client.on(events.NewMessage(pattern=r'^\.zombie(?:\s|$)', func=lambda e: e.is_group))
+async def zombie_command(event):
+    """Remove all deleted accounts from group"""
+    try:
+        # Admin check karein
+        user_perms = await event.client.get_permissions(event.chat_id, event.sender_id)
+        if not (user_perms.is_admin or user_perms.is_creator):
+            await event.edit("❌ You need to be admin to use this command!")
+            return
+        
+        await event.edit("🧟 **Scanning for deleted accounts...**")
+        
+        deleted_users = []
+        
+        # All participants collect karein
+        participants = await event.client.get_participants(event.chat_id)
+        
+        for user in participants:
+            if user.deleted:
+                deleted_users.append(user.id)
+        
+        if not deleted_users:
+            await event.edit("✅ **No deleted accounts found!** Clean as a whistle! 🎉")
+            return
+        
+        # Confirmation ke liye
+        confirm_msg = await event.reply(
+            f"⚠️ **Found {len(deleted_users)} deleted accounts!**\n"
+            f"Type `.yes` to remove them or `.no` to cancel."
+        )
+        
+        # Confirmation wait karein
+        try:
+            # Define a conversation handler
+            @client.on(events.NewMessage(pattern=r'^\.(yes|no)$', chats=event.chat_id, from_users=event.sender_id))
+            async def confirm_handler(confirm_event):
+                await delete_command_message(event)
+                nonlocal confirm_msg
+                
+                if confirm_event.text == '.yes':
+                    await confirm_msg.reply("🗑️ **Removing deleted accounts...**")
+                    removed_count = 0
+                    
+                    for user_id in deleted_users:
+                        try:
+                            await event.client.edit_permissions(
+                                event.chat_id,
+                                user_id,
+                                view_messages=False
+                            )
+                            removed_count += 1
+                            await asyncio.sleep(0.5)  # Flood avoid
+                        except:
+                            continue
+                    
+                    await event.reply(f"✅ **Cleaned {removed_count} deleted accounts!** 🧹")
+                    
+                elif confirm_event.text == '.no':
+                    await confirm_msg.edit("❌ **Operation cancelled!**")
+                
+                # Handler remove karein
+                client.remove_event_handler(confirm_handler)
+            
+            # 30 seconds wait
+            await asyncio.sleep(30)
+            
+        except Exception as e:
+            await event.reply(f"❌ Error: {str(e)}")
+            
+    except Exception as e:
+        await event.reply(f"❌ Error: {str(e)}")
+
+# ========== Helper Functions ==========
+import html
+
+async def is_admin(chat_id, user_id):
+    """Check if user is admin"""
+    try:
+        perms = await client.get_permissions(chat_id, user_id)
+        return perms.is_admin or perms.is_creator
+    except:
+        return False
+
+        
+    #admins
+@client.on(events.NewMessage(pattern=r"\.adminlist$"))
+async def adminlist_handler(event):
+    if not event.is_group:
+        return await event.edit("❌ 𝙔𝙚 𝙘𝙤𝙢𝙢𝙖𝙣𝙙 𝙨𝙞𝙧𝙛 𝙜𝙧𝙤𝙪𝙥𝙨 𝙢𝙚 𝙠𝙖𝙖𝙢 𝙠𝙖𝙧𝙩𝙞 𝙝𝙖𝙞")
+
+    admins = await client(GetParticipantsRequest(
+        channel=event.chat_id,
+        filter=ChannelParticipantsAdmins(),
+        offset=0,
+        limit=100,
+        hash=0
+    ))
+
+    text = (
+        "👑 **𝘼𝘿𝙈𝙄𝙉** 👑\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    for i, user in enumerate(admins.users, start=1):
+        name = user.first_name or "Admin"
+
+        if user.username:
+            mention = f"@{user.username}"
+        else:
+            mention = f"[{name}](tg://user?id={user.id})"
+
+        text += f"🔹 **{i}. {mention}**\n\n"
+
+    text += "━━━━━━━━━━━━━━━━━━\n"
+    text += "⚡ 𝙋𝙤𝙬𝙚𝙧𝙚𝙙 𝙗𝙮 𝙐𝙨𝙚𝙧𝙗𝙤𝙩 ⚡"
+
+    await event.reply(text, link_preview=False)
+    
+# Target bot
+INFO_BOT = "@funstate00_bot"
+
+@client.on(events.NewMessage(pattern=r'\.data'))
+async def data_command(event):
+    """Send only user ID to bot"""
+    try:
+        # Delete command message
+        await event.delete()
+    except:
+        pass
+    
+    # Check if replying to a user
+    if not event.is_reply:
+        await event.respond("❌ **Please reply to a user's message**")
+        return
+    
+    # Get the replied message
+    reply_msg = await event.get_reply_message()
+    user_id = reply_msg.sender_id
+    
+    try:
+        # Get user info
+        user = await client.get_entity(user_id)
+        
+        # Send status
+        status_msg = await event.respond(f"🔄 **Fetching Information About User...**")
+        
+        # Send ONLY user ID to the bot (no command)
+        await client.send_message(INFO_BOT, f"{user_id}")
+        
+        # Wait for bot response
+        await asyncio.sleep(2)
+        
+        # Get bot's response
+        bot_response = None
+        async for message in client.iter_messages(INFO_BOT, limit=5):
+            if message.sender_id != event.sender_id and message.text:
+                bot_response = message.text
+                break
+        
+        if bot_response:
+            # Send bot's response to chat
+            await event.respond(f"🤖 **Information Found:**\n\n{bot_response}")
+            await status_msg.delete()
+        else:
+            await status_msg.edit(f"✅ **User ID sent to bot**\n👤 **User:** {user.first_name or ''}\n🆔 **ID:** `{user_id}`\n❌ **No response yet**")
+        
+    except Exception as e:
+        await event.respond(f"❌ **Error:** {str(e)}")
+
+# Sangmata bots
+SANGMATA_BOTS = [
+    '@SangMata_BOT'
+]
+
+@client.on(events.NewMessage(pattern=r'\.history'))
+async def history_command(event):
+    if event.sender_id != OWNER_ID:
+        return
+    
+    # Delete command message immediately
+    try:
+        await event.delete()
+    except:
+        pass
+    
+    # Get user quickly
+    user_obj = None
+    if event.is_reply:
+        reply = await event.get_reply_message()
+        user_obj = await event.client.get_entity(reply.sender_id)
+    else:
+        args = event.message.message.split()
+        if len(args) > 1:
+            try:
+                user_obj = await event.client.get_entity(args[1])
+            except:
+                await event.respond("Reply to user or provide username.")
+                return
+        else:
+            await event.respond(".history [reply/username]")
+            return
+    
+    if not user_obj:
+        return
+    
+    user_id = user_obj.id
+    
+    # Send initial response fast
+    progress_msg = await event.respond("🔍 Fetching history...")
+    
+    # Function to query a single bot
+    async def query_bot(bot_username):
+        try:
+            async with event.client.conversation(bot_username, timeout=8) as conv:
+                await conv.send_message(f"/history {user_id}")
+                response = await conv.get_response(timeout=10)
+                
+                if response and response.text:
+                    return response.text
+                    
+        except asyncio.TimeoutError:
+            return "timeout"
+        except FloodWaitError as e:
+            return f"flood_wait:{e.seconds}"
+        except Exception:
+            return "error"
+        return None
+    
+    # Query all bots in parallel
+    tasks = [query_bot(bot) for bot in SANGMATA_BOTS]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Process results
+    for result in results:
+        if result and isinstance(result, str):
+            if result in ["timeout", "error"] or result.startswith("flood_wait:"):
+                continue
+            elif result and ("History for" in result or "Names" in result):
+                # Found valid response
+                await progress_msg.delete()
+                
+                # Format the response in beautiful box
+                formatted_result = format_history_box(result, user_id)
+                
+                # Wrap in code block
+                final_output = f"```\n{formatted_result}\n```"
+                
+                # Handle long messages
+                if len(final_output) > 4096:
+                    parts = []
+                    current_part = ""
+                    
+                    for line in formatted_result.split('\n'):
+                        if len(current_part) + len(line) + 1 < 4000:
+                            current_part += line + '\n'
+                        else:
+                            parts.append(f"```\n{current_part}\n```")
+                            current_part = line + '\n'
+                    
+                    if current_part:
+                        parts.append(f"```\n{current_part}\n```")
+                    
+                    await event.respond(parts[0])
+                    
+                    for part in parts[1:]:
+                        await asyncio.sleep(1)
+                        await event.respond(part)
+                else:
+                    await event.respond(final_output)
+                
+                return
+    
+    # If no results
+    await progress_msg.edit("❌ History Not Found 🚫😭")
+
+
+def format_history_box(text, user_id):
+    """Format Sangmata response in beautiful box with emojis"""
+    lines = text.split('\n')
+    
+    formatted = "╭━━━━⟬ Account History ⟭━━━━╮\n"
+    formatted += "┃\n"
+    formatted += f"┃ ⟡➣ Target ID - {user_id}\n"
+    formatted += "┃\n"
+    
+    current_section = None
+    names_found = False
+    usernames_found = False
+    
+    for line in lines:
+        original_line = line
+        line = line.strip()
+        
+        if not line:
+            continue
+        
+        # Skip the main header
+        if "History for" in line:
+            continue
+        
+        # Check for Names section (case insensitive)
+        if line.lower() == "names" or line.lower().startswith("names"):
+            if not names_found:
+                formatted += "┃ 📝 Names\n"
+                formatted += "┃\n"
+                current_section = "names"
+                names_found = True
+            continue
+        
+        # Check for Usernames section
+        elif line.lower() == "usernames" or line.lower().startswith("usernames"):
+            if not usernames_found:
+                if names_found:
+                    formatted += "┃\n"
+                formatted += "┃ 🧾 Usernames\n"
+                formatted += "┃\n"
+                current_section = "usernames"
+                usernames_found = True
+            continue
+        
+        # Process numbered entries (e.g., "1. [07/04/26 18:33:10] .")
+        if line and line[0].isdigit():
+            # Extract the content after the number and dot
+            parts = line.split('. ', 1)
+            if len(parts) > 1:
+                content = parts[1].strip()
+                
+                # Remove the date part and keep only the actual name/username
+                # Format: "[07/04/26 18:33:10] ." or "[07/04/26 18:33:10] username"
+                import re
+                # Remove date pattern [DD/MM/YY HH:MM:SS]
+                clean_content = re.sub(r'\[.*?\]\s*', '', content)
+                
+                # If content is just "." or empty, show as "(empty)"
+                if not clean_content or clean_content == '.':
+                    clean_content = "(empty)"
+                
+                # Add to formatted output
+                if current_section == "names":
+                    formatted += f"┃ ⟡➣ {clean_content}\n"
+                elif current_section == "usernames":
+                    formatted += f"┃ ⟡➣ {clean_content}\n"
+    
+    # If no sections found, show raw response
+    if not names_found and not usernames_found:
+        formatted += "┃ Raw Response:\n"
+        formatted += "┃\n"
+        for line in lines:
+            line = line.strip()
+            if line and "History for" not in line:
+                # Limit line length
+                if len(line) > 60:
+                    line = line[:57] + "..."
+                formatted += f"┃ {line}\n"
+    
+    # Ensure proper spacing before footer
+    if formatted.endswith('\n'):
+        formatted += "┃\n"
+    else:
+        formatted += "\n┃\n"
+    
+    # Add footer
+    formatted += "╰━━━━━━━━━━━━━━━━━━━━━━╯"
+    
+    return formatted
+
+#weather
+
+API_KEY = "33abfb8d949296ba419c8e342afded3f"
+
+@client.on(events.NewMessage(pattern=r"\.weather (.+)"))
+async def weather_handler(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
+    city = event.pattern_match.group(1)
+
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}&units=metric"
+    r = requests.get(url).json()
+
+    if r.get("cod") != 200:
+        return await event.reply("City not found sir 🚫.")
+
+    temp = r["main"]["temp"]
+    feels = r["main"]["feels_like"]
+    desc = r["weather"][0]["description"]
+
+    await event.reply(
+        f"🌤 Weather: {city}\n"
+        f"🌡 Temp: {temp}°C\n"
+        f"🤒 Feels like: {feels}°C\n"
+        f"📝 Condition: {desc}"
+    )
+
+# Store old profile photos (file path)
+PFP_HISTORY = {}
+
+@client.on(events.NewMessage(pattern=r'^\.cp$', outgoing=True))
+async def change_pfp_cmd(event):
+    """Change profile picture from replied photo"""
+    reply = await event.get_reply_message()
+    
+    if not reply or not reply.photo:
+        await event.edit("❌ **Please reply to a photo!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    processing = await event.edit("🔄 **Changing profile picture...**")
+    
+    try:
+        # Download the photo
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            temp_path = tmp.name
+        
+        await reply.download_media(file=temp_path)
+        
+        # Save current PFP path for restore
+        current_photos = await client.get_profile_photos('me')
+        if current_photos:
+            # Download current PFP
+            old_pfp_path = f"old_pfp_{event.sender_id}.jpg"
+            await client.download_media(current_photos[0], file=old_pfp_path)
+            PFP_HISTORY[event.sender_id] = old_pfp_path
+        
+        # Upload new profile photo
+        file = await client.upload_file(temp_path)
+        await client(UploadProfilePhotoRequest(file=file))
+        
+        await processing.edit("✅ **Profile picture changed successfully!**")
+        
+        # Clean up temp file
+        os.unlink(temp_path)
+        
+    except Exception as e:
+        await processing.edit(f"❌ **Error:** `{str(e)}`")
+    
+    await asyncio.sleep(3)
+    await event.delete()
+
+@client.on(events.NewMessage(pattern=r'^\.bio(?:\s+(.+))?', outgoing=True))
+async def change_bio_cmd(event):
+    """Change profile bio"""
+    new_bio = event.pattern_match.group(1)
+    
+    if not new_bio:
+        # Show current bio
+        me = await client.get_me()
+        current_bio = me.about or "No bio set"
+        await event.edit(f"📝 **Current Bio:**\n`{current_bio}`")
+        await asyncio.sleep(5)
+        await event.delete()
+        return
+    
+    processing = await event.edit("🔄 **Updating bio...**")
+    
+    try:
+        await client(UpdateProfileRequest(
+            about=new_bio
+        ))
+        
+        await processing.edit(f"✅ **Bio updated successfully!**\n\n**New Bio:** `{new_bio}`")
+        
+    except Exception as e:
+        await processing.edit(f"❌ **Error:** `{str(e)}`")
+    
+    await asyncio.sleep(5)
+    await event.delete()
+
+@client.on(events.NewMessage(pattern=r'^\.rcp$', outgoing=True))
+async def restore_pfp_cmd(event):
+    """Restore previous profile picture"""
+    
+    if event.sender_id not in PFP_HISTORY:
+        await event.edit("❌ **No previous profile picture found!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    processing = await event.edit("🔄 **Restoring previous profile picture...**")
+    
+    try:
+        old_pfp_path = PFP_HISTORY[event.sender_id]
+        
+        if not os.path.exists(old_pfp_path):
+            await processing.edit("❌ **Previous profile picture file not found!**")
+            return
+        
+        # Upload and set old photo
+        file = await client.upload_file(old_pfp_path)
+        await client(UploadProfilePhotoRequest(file=file))
+        
+        # Clean up
+        os.unlink(old_pfp_path)
+        del PFP_HISTORY[event.sender_id]
+        
+        await processing.edit("✅ **Previous profile picture restored!**")
+        
+    except Exception as e:
+        await processing.edit(f"❌ **Error:** `{str(e)}`")
+    
+    await asyncio.sleep(3)
+    await event.delete()
+    
+@client.on(events.NewMessage(pattern=r"\.dp$"))
+async def dp_handler(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await delete_command_message(event)
+    reply = await event.get_reply_message()
+
+    if reply:
+        target = reply.sender
+    else:
+        target = event.chat
+
+    try:
+        photo = await client.get_profile_photos(target, limit=1)
+        if not photo:
+            return await event.reply("bhadwe ne dp nahi lagai 👺👺.")
+
+        await client.send_file(
+            event.chat_id,
+            photo[0]
+        )
+    except Exception:
+        await event.reply("DP fetch karne me error aaya.")
+        
+@client.on(events.NewMessage(pattern=r'^\.qr(?: |$)([\s\S]*)$'))
+async def qr_generator(event):
+    """Generate Colorful QR Code from text/URL"""
+    input_text = event.pattern_match.group(1).strip()
+    
+    if not input_text:
+        await event.reply("❌ **Usage:** `.qr <text or URL>`\nExample: `.qr https://github.com`")
+        return
+    
+    try:
+        # Attractive color combinations
+        colors = [
+    ("#0F2027", "#203A43"),  # Dark Blue → Steel Blue (clean & pro)
+    ("#141E30", "#243B55"),  # Midnight Blue → Slate
+    ("#232526", "#414345"),  # Charcoal → Soft Gray (minimal)
+    ("#1A2980", "#26D0CE"),  # Deep Blue → Aqua (balanced)
+    ("#2C3E50", "#4CA2AF"),  # Navy → Muted Cyan
+    ("#3A1C71", "#D76D77"),  # Royal Purple → Soft Rose
+    ("#0B486B", "#F56217"),  # Dark Blue → Orange (high contrast but classy)
+    ("#1F4037", "#99F2C8"),  # Forest Green → Mint
+]
+
+        
+        fill_color, bg_color = random.choice(colors)
+        
+        # Generate QR Code
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=15,
+            border=4,
+        )
+        qr.add_data(input_text)
+        qr.make(fit=True)
+        
+        # Create image with colors
+        img = qr.make_image(fill_color=fill_color, back_color=bg_color)
+        
+        # Convert to RGB
+        img = img.convert("RGB")
+        
+        # Save to bytes as JPG (not PNG)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=95)  # JPEG format with 95% quality
+        buf.seek(0)
+        buf.name = 'qr_code.jpg'  # JPG filename
+        
+        # Send as photo
+        await event.client.send_message(
+            event.chat_id,
+            f"**🎨 QR Code Generated!**",
+            file=buf,
+            reply_to=event.id,
+            parse_mode='md'
+        )
+        
+    except Exception as e:
+        await event.reply(f"❌ **Error:** {str(e)}")
+
+
+# Cat Animation (Edit same message)
+@client.on(events.NewMessage(pattern='.cat'))
+async def cat_cmd(event):
+    msg = event.message
+    await msg.edit("┈┈┏━╮╭━┓┈╭━━━━╮")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃
+┈┈╰┓▋▋┏╯╯╰━━━━╯""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃
+┈┈╰┓▋▋┏╯╯╰━━━━╯
+┈╭━┻╮╲┗━━━━╮╭╮┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃
+┈┈╰┓▋▋┏╯╯╰━━━━╯
+┈╭━┻╮╲┗━━━━╮╭╮┈
+┈┃▎▎┃╲╲╲╲╲╲┣━╯┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃
+┈┈╰┓▋▋┏╯╯╰━━━━╯
+┈╭━┻╮╲┗━━━━╮╭╮┈
+┈┃▎▎┃╲╲╲╲╲╲┣━╯┈
+┈╰━┳┻▅╯╲╲╲╲┃┈┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃
+┈┈╰┓▋▋┏╯╯╰━━━━╯
+┈╭━┻╮╲┗━━━━╮╭╮┈
+┈┃▎▎┃╲╲╲╲╲╲┣━╯┈
+┈╰━┳┻▅╯╲╲╲╲┃┈┈┈
+┈┈┈╰━┳┓┏┳┓┏╯┈┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈┏━╮╭━┓┈╭━━━━╮
+┈┈┃┏┗┛┓┃╭┫cat ┃
+┈┈╰┓▋▋┏╯╯╰━━━━╯
+┈╭━┻╮╲┗━━━━╮╭╮┈
+┈┃▎▎┃╲╲╲╲╲╲┣━╯┈
+┈╰━┳┻▅╯╲╲╲╲┃┈┈┈
+┈┈┈╰━┳┓┏┳┓┏╯┈┈┈
+┈┈┈┈┈┗┻┛┗┻┛┈┈┈┈""")
+
+# Girlfriend Animation
+@client.on(events.NewMessage(pattern='.gf'))
+async def gf_cmd(event):
+    msg = event.message
+    await msg.edit("_/﹋\_")
+    await asyncio.sleep(0.2)
+    await msg.edit("""_/﹋\_
+(҂_´)""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""_/﹋\_
+(҂_´)
+<,︻╦╤─ ҉""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""_/﹋\_
+(҂_´)
+<,︻╦╤─ ҉
+_/﹋\_""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""_/﹋\_
+(҂_´)
+<,︻╦╤─ ҉
+_/﹋\_
+**Do you want to be my girlfriend??!**""")
+
+# Helicopter Animation
+@client.on(events.NewMessage(pattern='.helicopter'))
+async def helicopter_cmd(event):
+    msg = event.message
+    await msg.edit("▬▬▬.◙.▬▬▬")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══ 
+╬═╬""")
+    await asyncio.sleep(0.2)
+    for i in range(7):
+        text = f"""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══"""
+        for j in range(i+1):
+            text += f"\n╬═╬"
+        await msg.edit(text)
+        await asyncio.sleep(0.2)
+    
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ Hello Everyone :)""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ Hello Everyone :) 
+╬═╬☻/""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ Hello Everyone :) 
+╬═╬☻/ 
+╬═╬/▌""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""▬▬▬.◙.▬▬▬ 
+═▂▄▄▓▄▄▂ 
+◢◤ █▀▀████▄▄▄▄◢◤ 
+█▄ █ █▄ ███▀▀▀▀▀▀▀╬ 
+◥█████◤ 
+══╩══╩══ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ 
+╬═╬ Hello Everyone :) 
+╬═╬☻/ 
+╬═╬/▌ 
+╬═╬/ \\""")
+
+# Tank Animation
+@client.on(events.NewMessage(pattern='.tank'))
+async def tank_cmd(event):
+    msg = event.message
+    await msg.edit("█۞███████]▄▄▄▄▄▄▄▄▄▄▃")
+    await asyncio.sleep(0.2)
+    await msg.edit("""█۞███████]▄▄▄▄▄▄▄▄▄▄▃ 
+▂▄▅█████████▅▄▃▂…""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""█۞███████]▄▄▄▄▄▄▄▄▄▄▃ 
+▂▄▅█████████▅▄▃▂…
+[███████████████████]""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""█۞███████]▄▄▄▄▄▄▄▄▄▄▃ 
+▂▄▅█████████▅▄▃▂…
+[███████████████████]
+◥⊙▲⊙▲⊙▲⊙▲⊙▲⊙▲⊙◤""")
+
+# Run Animation
+@client.on(events.NewMessage(pattern='.run'))
+async def run_cmd(event):
+    msg = event.message
+    await msg.edit("────██──────▀▀▀██")
+    await asyncio.sleep(0.2)
+    await msg.edit("""────██──────▀▀▀██
+──▄▀█▄▄▄─────▄▀█▄▄▄""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""────██──────▀▀▀██
+──▄▀█▄▄▄─────▄▀█▄▄▄
+▄▀──█▄▄──────█─█▄▄""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""────██──────▀▀▀██
+──▄▀█▄▄▄─────▄▀█▄▄▄
+▄▀──█▄▄──────█─█▄▄
+─▄▄▄▀──▀▄───▄▄▄▀──▀▄""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""────██──────▀▀▀██
+──▄▀█▄▄▄─────▄▀█▄▄▄
+▄▀──█▄▄──────█─█▄▄
+─▄▄▄▀──▀▄───▄▄▄▀──▀▄
+─▀───────▀▀─▀───────▀▀""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""────██──────▀▀▀██
+──▄▀█▄▄▄─────▄▀█▄▄▄
+▄▀──█▄▄──────█─█▄▄
+─▄▄▄▀──▀▄───▄▄▄▀──▀▄
+─▀───────▀▀─▀───────▀▀
+Awkwokwokwok..""")
+
+# Nikal Animation
+@client.on(events.NewMessage(pattern='.nikal'))
+async def nikal_cmd(event):
+    msg = event.message
+    await msg.edit("⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇
+  ⠙⢿⣯⠄⠀⠀lodu⠀⠀⡿ ⠀⡇⠀⠀⠀⠀    ⡼""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇
+  ⠙⢿⣯⠄⠀⠀lodu⠀⠀⡿ ⠀⡇⠀⠀⠀⠀    ⡼
+⠀⠀⠀⠹⣶⠆⠀⠀⠀⠀⠀⡴⠃⠀   ⠘⠤⣄⣠⠞⠀""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇
+  ⠙⢿⣯⠄⠀⠀lodu⠀⠀⡿ ⠀⡇⠀⠀⠀⠀    ⡼
+⠀⠀⠀⠹⣶⠆⠀⠀⠀⠀⠀⡴⠃⠀   ⠘⠤⣄⣠⠞⠀
+⠀⠀⠀⠀⢸⣷⡦⢤⡤⢤⣞⣁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇
+  ⠙⢿⣯⠄⠀⠀lodu⠀⠀⡿ ⠀⡇⠀⠀⠀⠀    ⡼
+⠀⠀⠀⠹⣶⠆⠀⠀⠀⠀⠀⡴⠃⠀   ⠘⠤⣄⣠⠞⠀
+⠀⠀⠀⠀⢸⣷⡦⢤⡤⢤⣞⣁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⢀⣤⣴⣿⣏⠁⠀⠀⠸⣏⢯⣷⣖⣦⡀⠀⠀⠀⠀⠀⠀""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇
+  ⠙⢿⣯⠄⠀⠀lodu⠀⠀⡿ ⠀⡇⠀⠀⠀⠀    ⡼
+⠀⠀⠀⠹⣶⠆⠀⠀⠀⠀⠀⡴⠃⠀   ⠘⠤⣄⣠⠞⠀
+⠀⠀⠀⠀⢸⣷⡦⢤⡤⢤⣞⣁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⢀⣤⣴⣿⣏⠁⠀⠀⠸⣏⢯⣷⣖⣦⡀⠀⠀⠀⠀⠀⠀
+⢀⣾⣽⣿⣿⣿⣿⠛⢲⣶⣾⢉⡷⣿⣿⠵⣿⠀⠀⠀⠀⠀⠀""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⠀⠀⠀⣠⣶⡾⠏⠉⠙⠳⢦⡀⠀⠀⠀⢠⠞⠉⠙⠲⡀⠀
+ ⠀⣴⠿⠏⠀⠀⠀⠀⠀  ⠀⢳⡀⠀⡏⠀⠀    ⠀⢷
+⢠⣟⣋⡀⢀⣀⣀⡀⠀⣀⡀⣧⠀⢸⠀  ⠀     ⡇
+⢸⣯⡭⠁⠸⣛⣟⠆⡴⣻⡲⣿  ⣸ Nikal   ⡇
+ ⣟⣿⡭⠀⠀⠀⠀⠀⢱⠀   ⣿  ⢹⠀        ⡇
+  ⠙⢿⣯⠄⠀⠀lodu⠀⠀⡿ ⠀⡇⠀⠀⠀⠀    ⡼
+⠀⠀⠀⠹⣶⠆⠀⠀⠀⠀⠀⡴⠃⠀   ⠘⠤⣄⣠⠞⠀
+⠀⠀⠀⠀⢸⣷⡦⢤⡤⢤⣞⣁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⢀⣤⣴⣿⣏⠁⠀⠀⠸⣏⢯⣷⣖⣦⡀⠀⠀⠀⠀⠀⠀
+⢀⣾⣽⣿⣿⣿⣿⠛⢲⣶⣾⢉⡷⣿⣿⠵⣿⠀⠀⠀⠀⠀⠀
+⣼⣿⠍⠉⣿⡭⠉⠙⢺⣇⣼⡏⠀⠀ ⠀⣄⢸⠀⠀⠀⠀⠀⠀""")
+
+# Good Morning Animation
+@client.on(events.NewMessage(pattern='.gmm'))
+async def gm_cmd(event):
+    msg = event.message
+    await msg.edit("｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･
+╱╱╱╱╱╱╱╭╮╱╱╱╱╱╱╱╱╱╱╭╮""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･
+╱╱╱╱╱╱╱╭╮╱╱╱╱╱╱╱╱╱╱╭╮
+╭━┳━┳━┳╯┃╭━━┳━┳┳┳━┳╋╋━┳┳━╮""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･
+╱╱╱╱╱╱╱╭╮╱╱╱╱╱╱╱╱╱╱╭╮
+╭━┳━┳━┳╯┃╭━━┳━┳┳┳━┳╋╋━┳┳━╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃╋┃╭┫┃┃┃┃┃┃┃╋┃""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･
+╱╱╱╱╱╱╱╭╮╱╱╱╱╱╱╱╱╱╱╭╮
+╭━┳━┳━┳╯┃╭━━┳━┳┳┳━┳╋╋━┳┳━╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃╋┃╭┫┃┃┃┃┃┃┃╋┃
+┣╮┣━┻━┻━╯╰┻┻┻━┻╯╰┻━┻┻┻━╋╮┃""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･
+╱╱╱╱╱╱╱╭╮╱╱╱╱╱╱╱╱╱╱╭╮
+╭━┳━┳━┳╯┃╭━━┳━┳┳┳━┳╋╋━┳┳━╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃╋┃╭┫┃┃┃┃┃┃┃╋┃
+┣╮┣━┻━┻━╯╰┻┻┻━┻╯╰┻━┻┻┻━╋╮┃
+╰━╯╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╰━╯""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･
+╱╱╱╱╱╱╱╭╮╱╱╱╱╱╱╱╱╱╱╭╮
+╭━┳━┳━┳╯┃╭━━┳━┳┳┳━┳╋╋━┳┳━╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃╋┃╭┫┃┃┃┃┃┃┃╋┃
+┣╮┣━┻━┻━╯╰┻┻┻━┻╯╰┻━┻┻┻━╋╮┃
+╰━╯╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╰━╯
+｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･｡♥｡･ﾟ♡ﾟ･""")
+
+# Good Night Animation
+@client.on(events.NewMessage(pattern='.gn'))
+async def gn_cmd(event):
+    msg = event.message
+    await msg.edit("｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･
+╱╱╱╱╱╱╱╭╮╱╱╱╭╮╱╭╮╭╮""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･
+╱╱╱╱╱╱╱╭╮╱╱╱╭╮╱╭╮╭╮
+╭━┳━┳━┳╯┃╭━┳╋╋━┫╰┫╰╮""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･
+╱╱╱╱╱╱╱╭╮╱╱╱╭╮╱╭╮╭╮
+╭━┳━┳━┳╯┃╭━┳╋╋━┫╰┫╰╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃┃╋┃┃┃╭┫""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･
+╱╱╱╱╱╱╱╭╮╱╱╱╭╮╱╭╮╭╮
+╭━┳━┳━┳╯┃╭━┳╋╋━┫╰┫╰╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃┃╋┃┃┃╭┫
+┣╮┣━┻━┻━╯╰┻━┻╋╮┣┻┻━╯""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･
+╱╱╱╱╱╱╱╭╮╱╱╱╭╮╱╭╮╭╮
+╭━┳━┳━┳╯┃╭━┳╋╋━┫╰┫╰╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃┃╋┃┃┃╭┫
+┣╮┣━┻━┻━╯╰┻━┻╋╮┣┻┻━╯
+╰━╯╱╱╱╱╱╱╱╱╱╱╰━╯""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""｡♥｡･ﾟ♡ﾟ･｡♥｡･｡･｡･｡♥｡･
+╱╱╱╱╱╱╱╭╮╱╱╱╭╮╱╭╮╭╮
+╭━┳━┳━┳╯┃╭━┳╋╋━┫╰┫╰╮
+┃╋┃╋┃╋┃╋┃┃┃┃┃┃╋┃┃┃╭┫
+┣╮┣━┻━┻━╯╰┻━┻╋╮┣┻┻━╯
+╰━╯╱╱╱╱╱╱╱╱╱╱╰━╯
+｡♥｡･ﾟ♡ﾟ･｡♥° ♥｡･ﾟ♡ﾟ･""")
+    
+# Pikachu Animation
+@client.on(events.NewMessage(pattern='.pikachu'))
+async def pikachu_cmd(event):
+    msg = event.message
+    await msg.edit("⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿
+⣿⣿⣿⡟⠀⠀⢰⣹⡆⠀⠀⠀⠀⠀⠀⣭⣷⠀⠀⠀⠸⣿⣿⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿
+⣿⣿⣿⡟⠀⠀⢰⣹⡆⠀⠀⠀⠀⠀⠀⣭⣷⠀⠀⠀⠸⣿⣿⣿⣿
+⣿⣿⣿⠃⠀⠀⠈⠉⠀⠀⠤⠄⠀⠀⠀⠉⠁⠀⠀⠀⠀⢿⣿⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿
+⣿⣿⣿⡟⠀⠀⢰⣹⡆⠀⠀⠀⠀⠀⠀⣭⣷⠀⠀⠀⠸⣿⣿⣿⣿
+⣿⣿⣿⠃⠀⠀⠈⠉⠀⠀⠤⠄⠀⠀⠀⠉⠁⠀⠀⠀⠀⢿⣿⣿⣿
+⣿⣿⣿⢾⣿⣷⠀⠀⠀⠀⡠⠤⢄⠀⠀⠀⠠⣿⣿⣷⠀⢸⣿⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿
+⣿⣿⣿⡟⠀⠀⢰⣹⡆⠀⠀⠀⠀⠀⠀⣭⣷⠀⠀⠀⠸⣿⣿⣿⣿
+⣿⣿⣿⠃⠀⠀⠈⠉⠀⠀⠤⠄⠀⠀⠀⠉⠁⠀⠀⠀⠀⢿⣿⣿⣿
+⣿⣿⣿⢾⣿⣷⠀⠀⠀⠀⡠⠤⢄⠀⠀⠀⠠⣿⣿⣷⠀⢸⣿⣿⣿
+⣿⣿⣿⡀⠉⠀⠀⠀⠀⠀⢄⠀⢀⠀⠀⠀⠀⠉⠉⠁⠀⠀⣿⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿
+⣿⣿⣿⡟⠀⠀⢰⣹⡆⠀⠀⠀⠀⠀⠀⣭⣷⠀⠀⠀⠸⣿⣿⣿⣿
+⣿⣿⣿⠃⠀⠀⠈⠉⠀⠀⠤⠄⠀⠀⠀⠉⠁⠀⠀⠀⠀⢿⣿⣿⣿
+⣿⣿⣿⢾⣿⣷⠀⠀⠀⠀⡠⠤⢄⠀⠀⠀⠠⣿⣿⣷⠀⢸⣿⣿⣿
+⣿⣿⣿⡀⠉⠀⠀⠀⠀⠀⢄⠀⢀⠀⠀⠀⠀⠉⠉⠁⠀⠀⣿⣿⣿
+⣿⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢹⣿⣿""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""⡏⠉⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⣿
+⣿⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠉⠁⠀⣿
+⣿⣧⡀⠀⠀⠀⠀⠙⠿⠿⠿⠻⠿⠿⠟⠿⠛⠉⠀⠀⠀⠀⠀⣸⣿
+⣿⣿⣷⣄⠀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿
+⣿⣿⣿⣿⠏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠠⣴⣿⣿⣿⣿
+⣿⣿⣿⡟⠀⠀⢰⣹⡆⠀⠀⠀⠀⠀⠀⣭⣷⠀⠀⠀⠸⣿⣿⣿⣿
+⣿⣿⣿⠃⠀⠀⠈⠉⠀⠀⠤⠄⠀⠀⠀⠉⠁⠀⠀⠀⠀⢿⣿⣿⣿
+⣿⣿⣿⢾⣿⣷⠀⠀⠀⠀⡠⠤⢄⠀⠀⠀⠠⣿⣿⣷⠀⢸⣿⣿⣿
+⣿⣿⣿⡀⠉⠀⠀⠀⠀⠀⢄⠀⢀⠀⠀⠀⠀⠉⠉⠁⠀⠀⣿⣿⣿
+⣿⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢹⣿⣿
+⣿⣿⣿⣿⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿""")
+
+# Hmm Animation
+@client.on(events.NewMessage(pattern='.hmm'))
+async def hmm_cmd(event):
+    msg = event.message
+    await msg.edit("┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲
+┈╱▔╲▏┊┈┈┈┈┊▕╱▔╲▕""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲
+┈╱▔╲▏┊┈┈┈┈┊▕╱▔╲▕
+┈▏┈┈┈╰┈┈┈┈╯┈┈┈▕▕""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲
+┈╱▔╲▏┊┈┈┈┈┊▕╱▔╲▕
+┈▏┈┈┈╰┈┈┈┈╯┈┈┈▕▕
+┈╲┈┈┈╲┈┈┈┈╱┈┈┈╱┈╲""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲
+┈╱▔╲▏┊┈┈┈┈┊▕╱▔╲▕
+┈▏┈┈┈╰┈┈┈┈╯┈┈┈▕▕
+┈╲┈┈┈╲┈┈┈┈╱┈┈┈╱┈╲
+┈┈╲┈┈▕▔▔▔▔▏┈┈╱╲╲╲▏""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲
+┈╱▔╲▏┊┈┈┈┈┊▕╱▔╲▕
+┈▏┈┈┈╰┈┈┈┈╯┈┈┈▕▕
+┈╲┈┈┈╲┈┈┈┈╱┈┈┈╱┈╲
+┈┈╲┈┈▕▔▔▔▔▏┈┈╱╲╲╲▏
+┈╱▔┈┈▕┈┈┈┈▏┈┈▔╲▔▔""")
+    await asyncio.sleep(0.2)
+    await msg.edit("""┈┈╱▔▔▔▔▔╲┈┈┈HM┈HM
+┈╱┈┈╱▔╲╲╲▏┈┈┈HMMM
+╱┈┈╱━╱▔▔▔▔▔╲━╮┈┈
+▏┈▕┃▕╱▔╲╱▔╲▕╮┃┈┈
+▏┈▕╰━▏▊▕▕▋▕▕━╯┈┈
+╲┈┈╲╱▔╭╮▔▔┳╲╲┈┈┈
+┈╲┈┈▏╭━━━━╯▕▕┈┈┈
+┈┈╲┈╲▂▂▂▂▂▂╱╱┈┈┈
+┈┈┈┈▏┊┈┈┈┈┊┈┈┈╲
+┈┈┈┈▏┊┈┈┈┈┊▕╲┈┈╲
+┈╱▔╲▏┊┈┈┈┈┊▕╱▔╲▕
+┈▏┈┈┈╰┈┈┈┈╯┈┈┈▕▕
+┈╲┈┈┈╲┈┈┈┈╱┈┈┈╱┈╲
+┈┈╲┈┈▕▔▔▔▔▏┈┈╱╲╲╲▏
+┈╱▔┈┈▕┈┈┈┈▏┈┈▔╲▔▔
+┈╲▂▂▂╱┈┈┈┈╲▂▂▂╱┈""")  
+    
+# Heart Color Animation
+@client.on(events.NewMessage(pattern='.heart'))
+async def heart_cmd(event):
+    msg = event.message
+    
+    hearts = [
+        "❤️",  # Red Heart
+        "🧡",  # Orange Heart
+        "💛",  # Yellow Heart
+        "💚",  # Green Heart
+        "💙",  # Blue Heart
+        "💜",  # Purple Heart
+        "🖤",  # Black Heart
+        "🤍",  # White Heart
+        "🤎",  # Brown Heart
+        "💕",  # Two Hearts
+        "💞",  # Revolving Hearts
+        "💓",  # Beating Heart
+        "💗",  # Growing Heart
+        "💖",  # Sparkling Heart
+        "💘",  # Heart with Arrow
+        "💝",  # Heart with Ribbon
+        "💟",  # Heart Decoration
+        "❣️",  # Heavy Heart Exclamation
+        "💌",  # Love Letter
+        "🫀",  # Anatomical Heart
+        "🫶",  # Heart Hands
+    ]
+    
+    # Show each heart for 0.3 seconds
+    for heart in hearts:
+        await msg.edit(heart)
+        await asyncio.sleep(0.4)
+    
+    # Final animation - blinking heart
+    for i in range(3):
+        await msg.edit("💖")
+        await asyncio.sleep(0.4)
+        await msg.edit("✨")
+        await asyncio.sleep(0.3)
+    
+    # End with red heart
+    await msg.edit("❤️ LOVE YOU! ❤️")
+
+# Drugs Animation
+@client.on(events.NewMessage(pattern='.drugs'))
+async def drugs_cmd(event):
+    msg = event.message
+    
+    # Start with warning
+    await msg.edit("⚠️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("⚠️ DRUGS")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("⚠️ DRUGS ARE")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("⚠️ DRUGS ARE BAD")
+    await asyncio.sleep(0.3)
+    
+    # Start building the syringe
+    await msg.edit("💉")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　|""")
+    await asyncio.sleep(0.2)
+    
+    # Add the face
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼|""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼ 
+　|　３　 | 丶＼""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼ 
+　|　３　 | 丶＼ 
+＜ 、･　　|　　＼""")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("""
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼ 
+　|　３　 | 丶＼ 
+＜ 、･　　|　　＼ 
+　＼＿＿／∪ _ ∪)""")
+    await asyncio.sleep(0.2)
+    
+    # Complete animation
+    await msg.edit("""
+Drugs Everything...          
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼ 
+　|　３　 | 丶＼ 
+＜ 、･　　|　　＼ 
+　＼＿＿／∪ _ ∪) 
+　　　　　 Ｕ Ｕ""")
+    await asyncio.sleep(1)
+    
+    # Add effects
+    await msg.edit("""
+💀 Drugs Everything... 💀     
+　　　　　|
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼ 
+　|　３　 | 丶＼ 
+＜ 、･　　|　　＼ 
+　＼＿＿／∪ _ ∪) 
+　　　　　 Ｕ Ｕ
+         
+""")
+    await asyncio.sleep(0.5)
+    
+    # Final warning message
+    await msg.edit("""
+☠️  D R U G S  ☠️
+          
+　　　　　💉
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　　　　　| 
+　／￣￣＼| 
+＜ ´･ 　　 |＼ 
+　|　３　 | 丶＼ 
+＜ 、･　　|　　＼ 
+　＼＿＿／∪ _ ∪) 
+　　　　　 Ｕ Ｕ
+""")
+    
+# Cobra Animation
+@client.on(events.NewMessage(pattern='.cobra'))
+async def cobra_cmd(event):
+    msg = event.message
+    
+    # Start with cobra head
+    await msg.edit("🐍")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("🐍\n▓")
+    await asyncio.sleep(0.2)
+    
+    # Build the cobra body
+    await msg.edit("""🐍 COBRA
+░░░░▓""")
+    await asyncio.sleep(0.1)
+    
+    await msg.edit("""🐍 COBRA
+░░░░▓
+░░░▓▓""")
+    await asyncio.sleep(0.1)
+    
+    await msg.edit("""🐍 COBRA
+░░░░▓
+░░░▓▓
+░░█▓▓█""")
+    await asyncio.sleep(0.1)
+    
+    await msg.edit("""🐍 COBRA
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██""")
+    await asyncio.sleep(0.1)
+    
+    # Start the snake moving animation
+    snake_body = [
+        "░░░░▓",
+        "░░░▓▓", 
+        "░░█▓▓█",
+        "░██▓▓██",
+        "░░██▓▓██",
+        "░░░██▓▓██",
+        "░░░░██▓▓██",
+        "░░░░░██▓▓██",
+        "░░░░██▓▓██",
+        "░░░██▓▓██",
+        "░░██▓▓██",
+        "░██▓▓██",
+        "░░██▓▓██",
+        "░░░██▓▓██",
+        "░░░░██▓▓██",
+        "░░░░░██▓▓██",
+        "░░░░██▓▓██",
+        "░░░██▓▓██",
+        "░░██▓▓██",
+        "░██▓▓██",
+    ]
+    
+    # Show cobra moving
+    for i in range(15):
+        body_part = "\n".join(snake_body[i:i+8])
+        await msg.edit(f"""🐍 HISS... SSS...
+{body_part}""")
+        await asyncio.sleep(0.15)
+    
+    # Show full cobra body
+    await msg.edit("""🐍 ⚡ COBRA SNAKE ⚡
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██""")
+    await asyncio.sleep(0.3)
+    
+    # Cobra striking
+    await msg.edit("""🐍⚡
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+SSSSSS... HISS!""")
+    await asyncio.sleep(0.3)
+    
+    # More movement
+    await msg.edit("""🐍⚠️ DANGER!
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██""")
+    await asyncio.sleep(0.3)
+    
+    # Full length cobra
+    await msg.edit("""🐍 🐍 🐍 COBRA 🐍 🐍 🐍
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██""")
+    await asyncio.sleep(0.5)
+    
+    # Cobra coiled
+    await msg.edit("""🐍 COBRA COILED
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░░██▓▓███
+░░░░██▓▓████
+░░░░░██▓▓█████
+░░░░░░██▓▓██████
+░░░░░░███▓▓███████
+░░░░░████▓▓████████
+░░░░█████▓▓█████████""")
+    await asyncio.sleep(0.5)
+    
+    # Final cobra with full body
+    await msg.edit("""🐍 ⚠️ VENOMOUS COBRA ⚠️
+░░░░▓
+░░░▓▓
+░░█▓▓█
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░██▓▓██
+░░██▓▓██
+░░░██▓▓██
+░░░░██▓▓██
+░░░░░██▓▓██
+░░░░██▓▓██
+░░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░██▓▓██
+░░░██▓▓███
+░░░░██▓▓████
+░░░░░██▓▓█████
+░░░░░░██▓▓██████
+░░░░░░███▓▓███████
+░░░░░████▓▓████████
+░░░░█████▓▓█████████
+░░░█████░░░█████●███
+░░████░░░░░░░███████
+░░███░░░░░░░░░██████
+░░██░░░░░░░░░░░████
+░░░░░░░░░░░░░░░░███
+░░░░░░░░░░░░░░░░░░░
+        
+⚠️ DANGER: VENOMOUS SNAKE ⚠️
+🐍 COBRA - Naja naja""")
+    
+# Rain Animation
+@client.on(events.NewMessage(pattern='.rain'))
+async def rain_cmd(event):
+    msg = event.message
+    
+    # Cloud forming
+    await msg.edit("☁️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("☁️ ☁️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("☁️ ☁️ ☁️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("🌧️ CLOUDS FORMING...")
+    await asyncio.sleep(0.3)
+    
+    # Rain starts
+    rain_frames = [
+        """🌧️  RAIN  🌧️
+  '  '  '  '
+ '  '  '  ' 
+'  '  '  '  """,
+        """🌧️  RAIN  🌧️
+ '  '  '  ' 
+'  '  '  '  
+  '  '  '  '""",
+        """🌧️  RAIN  🌧️
+'  '  '  '  
+  '  '  '  '
+ '  '  '  ' """
+    ]
+    
+    for _ in range(8):
+        for frame in rain_frames:
+            await msg.edit(frame)
+            await asyncio.sleep(0.2)
+    
+    # Heavy rain
+    await msg.edit("""⛈️ HEAVY RAIN ⛈️
+💧💧💧💧💧💧💧
+💧💧💧💧💧💧💧
+💧💧💧💧💧💧💧
+💧💧💧💧💧💧💧
+🌊 PUDDLES FORMING 🌊""")
+    await asyncio.sleep(1)
+    
+    # Final
+    await msg.edit("""🌧️🌧️🌧️🌧️🌧️🌧️🌧️
+  💧💧💧💧💧💧
+    💧💧💧💧💧
+      💧💧💧💧
+        💧💧💧
+          💧💧
+            💧
+            
+☔ TAKE AN UMBRELLA! ☔""")
+
+# Snow Animation
+@client.on(events.NewMessage(pattern='.snow'))
+async def snow_cmd(event):
+    msg = event.message
+    
+    # Cold weather
+    await msg.edit("❄️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("❄️ ❄️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("❄️ ❄️ ❄️")
+    await asyncio.sleep(0.3)
+    
+    # Snow falling
+    snow_flakes = ["❄️", "✨", "＊", "✧", "✶", "✺", "❅", "❆"]
+    
+    for _ in range(15):
+        snow = ""
+        for i in range(5):
+            line = ""
+            for j in range(10):
+                if random.random() > 0.6:
+                    line += random.choice(snow_flakes) + " "
+                else:
+                    line += "  "
+            snow += line + "\n"
+        
+        await msg.edit(f"""🌨️ SNOWFALL 🌨️
+{snow}
+⛄ BUILDING A SNOWMAN ⛄""")
+        await asyncio.sleep(0.3)
+    
+    # Snow covered
+    await msg.edit("""🏔️ WINTER WONDERLAND 🏔️
+❄️❄️❄️❄️❄️❄️❄️❄️❄️
+  ❄️❄️❄️❄️❄️❄️❄️❄️
+    ❄️❄️❄️❄️❄️❄️❄️
+      ❄️❄️❄️❄️❄️❄️
+        ❄️❄️❄️❄️❄️
+          ❄️❄️❄️❄️
+            ❄️❄️❄️
+              ❄️❄️
+                ❄️
+                
+☃️ BRRR... IT'S COLD! ☃️""")
+
+# Fire Animation
+@client.on(events.NewMessage(pattern='.fire'))
+async def fire_cmd(event):
+    msg = event.message
+    
+    # Spark
+    await msg.edit("✨")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("🔥")
+    await asyncio.sleep(0.2)
+    
+    # Fire growing
+    fire_frames = [
+        """🔥
+ | 
+ | """,
+        """ 🔥
+ /|\\
+ | """,
+        """  🔥
+ /|\\
+/ | \\""",
+        """   🔥🔥
+  /|\\
+ / | \\
+|     |""",
+        """    🔥🔥🔥
+   /|\\
+  / | \\
+ /  |  \\
+|       |""",
+        """     🔥🔥🔥🔥
+    /|\\
+   / | \\
+  /  |  \\
+ /   |   \\
+|         |"""
+    ]
+    
+    for frame in fire_frames:
+        await msg.edit(frame)
+        await asyncio.sleep(0.3)
+    
+    # Burning fire
+    burning = [
+        """🔥 FIRE! 🔥
+     🔥🔥🔥
+    🔥🔥🔥🔥
+   🔥🔥🔥🔥🔥
+  🔥🔥🔥🔥🔥🔥
+ 🔥🔥🔥🔥🔥🔥🔥""",
+        """🔥 FIRE! 🔥
+    🔥🔥🔥🔥
+   🔥🔥🔥🔥🔥
+  🔥🔥🔥🔥🔥🔥
+ 🔥🔥🔥🔥🔥🔥🔥
+🔥🔥🔥🔥🔥🔥🔥🔥""",
+        """🔥 FIRE! 🔥
+   🔥🔥🔥🔥🔥
+  🔥🔥🔥🔥🔥🔥
+ 🔥🔥🔥🔥🔥🔥🔥
+🔥🔥🔥🔥🔥🔥🔥🔥
+ 🔥🔥🔥🔥🔥🔥🔥"""
+    ]
+    
+    for _ in range(10):
+        for frame in burning:
+            await msg.edit(frame)
+            await asyncio.sleep(0.2)
+    
+    # Fire extinguishing
+    await msg.edit("""🚨 FIRE ALERT! 🚨
+🔥🔥🔥🔥🔥🔥🔥🔥
+ 🔥🔥🔥🔥🔥🔥🔥
+  🔥🔥🔥🔥🔥🔥
+   🔥🔥🔥🔥🔥
+    🔥🔥🔥🔥
+     🔥🔥🔥""")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("""💦 EXTINGUISHING... 💦
+🔥🔥🔥🔥🔥🔥🔥🔥
+ 🔥🔥🔥🔥🔥🔥🔥
+  🔥🔥🔥🔥🔥🔥
+   🔥🔥🔥🔥🔥
+    🔥🔥🔥🔥""")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("""✅ FIRE PUT OUT ✅
+ 🔥🔥🔥🔥🔥🔥
+  🔥🔥🔥🔥🔥
+   🔥🔥🔥🔥
+    🔥🔥🔥
+     🔥🔥
+      🔥""")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("""⚠️ FIRE SAFETY ⚠️
+   🚒
+  /|\\
+ / | \\
+🚫 NO PLAYING WITH FIRE! 🔥""")
+
+# Storm Animation
+@client.on(events.NewMessage(pattern='.storm'))
+async def storm_cmd(event):
+    msg = event.message
+    
+    # Dark clouds
+    await msg.edit("☁️")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("☁️ ☁️")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("☁️ ☁️ ☁️")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("🌩️ DARK CLOUDS...")
+    await asyncio.sleep(0.3)
+    
+    # Storm building
+    storm_frames = [
+        """🌪️ STORM APPROACHING 🌪️
+   ⚡
+  /|\\
+ / | \\""",
+        """🌪️ STORM APPROACHING 🌪️
+    ⚡
+   /|\\
+  / | \\
+ /  |  \\""",
+        """🌪️ STORM WARNING 🌪️
+     ⚡⚡
+    /|\\
+   / | \\
+  /  |  \\
+ /   |   \\""",
+        """🌪️ STORM WARNING 🌪️
+      ⚡⚡⚡
+     /|\\
+    / | \\
+   /  |  \\
+  /   |   \\
+ /    |    \\""",
+    ]
+    
+    for frame in storm_frames:
+        await msg.edit(frame)
+        await asyncio.sleep(0.4)
+    
+    # Full storm
+    storm_animation = [
+        """⛈️ THUNDERSTORM! ⛈️
+⚡⚡⚡⚡⚡⚡⚡⚡
+🌧️🌧️🌧️🌧️🌧️🌧️🌧️🌧️
+💨💨💨💨💨💨💨💨💨💨
+🌪️ WIND SPEED: 80 km/h 🌪️""",
+        """⛈️ THUNDERSTORM! ⛈️
+🌧️🌧️🌧️🌧️🌧️🌧️🌧️🌧️
+⚡⚡⚡⚡⚡⚡⚡⚡
+💨💨💨💨💨💨💨💨💨💨
+🌪️ WIND SPEED: 100 km/h 🌪️""",
+        """⛈️ THUNDERSTORM! ⛈️
+💨💨💨💨💨💨💨💨💨💨
+🌧️🌧️🌧️🌧️🌧️🌧️🌧️🌧️
+⚡⚡⚡⚡⚡⚡⚡⚡
+🌪️ WIND SPEED: 120 km/h 🌪️"""
+    ]
+    
+    for _ in range(12):
+        for frame in storm_animation:
+            await msg.edit(frame)
+            await asyncio.sleep(0.2)
+    
+    # Storm calming
+    await msg.edit("""🌬️ STORM SUBSIDING...
+⚡
+🌧️
+💨
+SEEK SHELTER! 🏠""")
+    await asyncio.sleep(1)
+    
+    await msg.edit("""🌈 STORM PASSED 🌈
+  ☁️     ☁️
+    ☀️
+  /|\\
+ / | \\
+STAY SAFE! ⚠️""")
+
+# Lightning Animation
+@client.on(events.NewMessage(pattern='.lightning'))
+async def lightning_cmd(event):
+    msg = event.message
+    
+    # Dark sky
+    await msg.edit("🌑")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("🌑 🌑")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("🌑 🌑 🌑")
+    await asyncio.sleep(0.3)
+    
+    # Lightning strikes
+    lightning_patterns = [
+        """⚡ LIGHTNING STRIKE! ⚡
+    ⚡
+   ⚡ ⚡
+  ⚡   ⚡
+ ⚡     ⚡
+⚡       ⚡""",
+        """⚡ LIGHTNING STRIKE! ⚡
+ ⚡     ⚡
+  ⚡   ⚡
+   ⚡ ⚡
+    ⚡
+   ⚡ ⚡
+  ⚡   ⚡""",
+        """⚡ LIGHTNING STRIKE! ⚡
+⚡       ⚡
+ ⚡     ⚡
+  ⚡   ⚡
+   ⚡ ⚡
+    ⚡""",
+        """⚡ LIGHTNING STRIKE! ⚡
+    ⚡
+   ⚡⚡
+  ⚡  ⚡
+ ⚡    ⚡
+⚡      ⚡""",
+        """⚡ LIGHTNING STRIKE! ⚡
+⚡      ⚡
+ ⚡    ⚡
+  ⚡  ⚡
+   ⚡⚡
+    ⚡"""
+    ]
+    
+    # Flash effect
+    for _ in range(8):
+        # Flash on
+        for pattern in lightning_patterns[:3]:
+            await msg.edit(pattern)
+            await asyncio.sleep(0.1)
+        
+        # Flash off (dark)
+        await msg.edit("""🌑 DARK SKY 🌑
+    
+THUNDER CRASHES! 💥""")
+        await asyncio.sleep(0.2)
+        
+        # Flash on again
+        for pattern in lightning_patterns[3:]:
+            await msg.edit(pattern)
+            await asyncio.sleep(0.1)
+        
+        # Dark again
+        await msg.edit("""🌑 DARK SKY 🌑
+    
+BOOM! 🔊""")
+        await asyncio.sleep(0.3)
+    
+    # Multiple lightning
+    await msg.edit("""⚡⚡ MULTIPLE STRIKES! ⚡⚡
+   ⚡     ⚡
+  ⚡ ⚡   ⚡ ⚡
+ ⚡   ⚡ ⚡   ⚡
+⚡     ⚡     ⚡
+ ⚡   ⚡ ⚡   ⚡
+  ⚡ ⚡   ⚡ ⚡
+   ⚡     ⚡""")
+    await asyncio.sleep(0.5)
+    
+    # Lightning hitting ground
+    await msg.edit("""🌩️ LIGHTNING BOLT! 🌩️
+         ⚡
+        ⚡ ⚡
+       ⚡   ⚡
+      ⚡     ⚡
+     ⚡       ⚡
+    ⚡         ⚡
+   ⚡           ⚡
+  ⚡             ⚡
+ ⚡               ⚡
+💥 HIT THE GROUND! 💥""")
+    await asyncio.sleep(0.8)
+    
+    # Final warning
+    await msg.edit("""⚠️ LIGHTNING SAFETY ⚠️
+    ⚡
+   ⚡ ⚡
+  ⚡   ⚡
+ ⚡     ⚡
+🏠 STAY INDOORS 🏠
+🚫 NO OPEN AREAS 🚫
+☎️ EMERGENCY: 112 ☎️""")
+    
+# India Flag Animation with Sare Jahan Se Achha
+@client.on(events.NewMessage(pattern='.india'))
+async def india_cmd(event):
+    msg = event.message
+    
+    # Start with Ashok Chakra
+    await msg.edit("☸️")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("☸️\nभारत")
+    await asyncio.sleep(0.3)
+    
+    # Building the flag
+    steps = [
+        """   ┃
+   🟠""",
+        """   ┃
+   🟠
+   ⚪""",
+        """   ┃
+   🟠
+   ⚪
+   🟢""",
+        """   ┃
+   🟠🟠🟠
+   ⚪⚪⚪
+   🟢🟢🟢""",
+        """   ┃
+   🟠🟠🟠🟠🟠
+   ⚪⚪⚪⚪⚪
+   🟢🟢🟢🟢🟢""",
+        """   ┃
+   🟠🟠🟠🟠🟠
+   ⚪⚪🟦☸️🟦⚪⚪
+   🟢🟢🟢🟢🟢""",
+        """🇮🇳
+   ┃
+   🟠🟠🟠🟠🟠
+   ⚪⚪🟦☸️🟦⚪⚪
+   🟢🟢🟢🟢🟢"""
+    ]
+    
+    for step in steps:
+        await msg.edit(step)
+        await asyncio.sleep(0.2)
+    
+    # Flag waving animation
+    wave_frames = [
+        """🇮🇳
+   │
+   🟠🟠🟠🟠🟠
+   ⚪⚪🟦☸️🟦⚪⚪
+   🟢🟢🟢🟢🟢""",
+        """🇮🇳
+   ╱
+   🟠🟠🟠🟠🟠
+   ⚪⚪🟦☸️🟦⚪⚪
+   🟢🟢🟢🟢🟢""",
+        """🇮🇳
+   │
+   🟠🟠🟠🟠🟠
+   ⚪⚪🟦☸️🟦⚪⚪
+   🟢🟢🟢🟢🟢""",
+        """🇮🇳
+   ╲
+   🟠🟠🟠🟠🟠
+   ⚪⚪🟦☸️🟦⚪⚪
+   🟢🟢🟢🟢🟢"""
+    ]
+    
+    # Wave flag 5 times
+    for _ in range(5):
+        for frame in wave_frames:
+            await msg.edit(frame)
+            await asyncio.sleep(0.2)
+    
+    # Show complete flag with lyrics
+    lyrics = [
+        "सारे जहाँ से अच्छा हिन्दोस्तां हमारा",
+        "हम बुलबुलें हैं इसकी यह गुलिस्तां हमारा",
+        "ग़ुरबत में हों अगर हम, रहता है दिल वतन में",
+        "समझो वहीं हमें भी, दिल हो जहाँ हमारा"
+    ]
+    
+    # Show flag with each line
+    for i, line in enumerate(lyrics):
+        flag_design = f"""🇮🇳🇮🇳🇮🇳🇮🇳🇮🇳🇮🇳🇮🇳
+┏━━━━━━━━━━━━━━━━━━━━┓
+┃   🟠🟠🟠🟠🟠🟠🟠   ┃
+┃   ⚪⚪🟦☸️🟦⚪⚪   ┃
+┃   🟢🟢🟢🟢🟢🟢🟢   ┃
+┗━━━━━━━━━━━━━━━━━━━━┛
+{line}"""
+        
+        await msg.edit(flag_design)
+        await asyncio.sleep(1)
+    
+    # National anthem style
+    await msg.edit("""🎺 जन गण मन... 🎺
+┏━━━━━━━━━━━━━━━━━━━━┓
+┃   🟠🟠🟠🟠🟠🟠🟠   ┃
+┃   ⚪⚪🟦☸️🟦⚪⚪   ┃
+┃   🟢🟢🟢🟢🟢🟢🟢   ┃
+┗━━━━━━━━━━━━━━━━━━━━┛
+वन्दे मातरम्! 🙏""")
+    await asyncio.sleep(1)
+    
+    # Final patriotic display
+    await msg.edit("""✨ भारत माता की जय! ✨
+██████████████████████
+█🟠🟠🟠🟠🟠🟠🟠🟠🟠🟠█
+█⚪⚪⚪🟦☸️🟦⚪⚪⚪█
+█🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢█
+██████████████████████
+
+🇮🇳 जय हिन्द! 🇮🇳
+🇮🇳 वन्दे मातरम्! 🇮🇳
+🇮🇳 भारत माता की जय! 🇮🇳""")
+    await asyncio.sleep(1)
+    
+    # End with Ashok Chakra
+    await msg.edit("""☸️ अशोक चक्र ☸️
+   ⚪⚪⚪⚪⚪
+ ⚪🟦🟦🟦🟦🟦⚪
+⚪🟦  २४   🟦⚪
+ ⚪🟦🟦🟦🟦🟦⚪
+   ⚪⚪⚪⚪⚪
+   
+धर्मचक्र प्रवर्तनाय
+सत्यमेव जयते! ✨""")
+    
+# Dance Animation
+@client.on(events.NewMessage(pattern='.dance'))
+async def dance_cmd(event):
+    msg = event.message
+    
+    # Start with music
+    await msg.edit("🎵")
+    await asyncio.sleep(0.2)
+    
+    # Dance moves
+    dance_moves = [
+        """💃 DANCE TIME! 💃
+   O
+  /|\\
+  / \\""",
+        """💃 DANCE TIME! 💃
+ \\O/
+  |
+  / \\""",
+        """💃 DANCE TIME! 💃
+   O
+  <|>
+  / \\""",
+        """💃 DANCE TIME! 💃
+ \\O/
+  |\\
+  / \\""",
+        """💃 DANCE TIME! 💃
+   O
+  /|\\
+ / \\""",
+        """💃 DANCE TIME! 💃
+   O
+  /|\\
+_/ \\_""",
+        """💃 DANCE TIME! 💃
+ \\O/
+  |\\
+_/ \\_""",
+        """💃 DANCE TIME! 💃
+   O
+  <|>
+_/ \\_"""
+    ]
+    
+    # Dance for 10 seconds
+    for _ in range(15):
+        for move in dance_moves:
+            await msg.edit(move)
+            await asyncio.sleep(0.2)
+    
+    # Final dance
+    await msg.edit("""🕺💃 DANCE PARTY! 💃🕺
+   O   O
+  /|\\ /|\\
+  / \\ / \\
+🎶 Let's Dance! 🎶""")
+
+# Love Animation
+@client.on(events.NewMessage(pattern='.love'))
+async def love_cmd(event):
+    msg = event.message
+    
+    # Start with single heart
+    await msg.edit("❤️")
+    await asyncio.sleep(0.3)
+    
+    # Heart breaking
+    await msg.edit("💔")
+    await asyncio.sleep(0.5)
+    
+    # Broken pieces
+    await msg.edit("💔\n/\\")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("💔\n/\\\n\\/")
+    await asyncio.sleep(0.3)
+    
+    # Pieces falling
+    await msg.edit("   💔\n  /\\\n \\/\n💔")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("     💔\n    /\\\n   \\/\n  💔\n /\\")
+    await asyncio.sleep(0.3)
+    
+    # Pieces coming back together
+    await msg.edit("💔 pieces coming together...")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("    💔\n   <3\n  💔")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("   💔\n  <3>\n 💔")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("  💔\n <3❤️3>\n💔")
+    await asyncio.sleep(0.3)
+    
+    # Heart healing
+    await msg.edit("❤️‍🩹")
+    await asyncio.sleep(0.5)
+    
+    # Heart complete again
+    await msg.edit("❤️")
+    await asyncio.sleep(0.3)
+    
+    # Love grows
+    love_growth = [
+        "❤️",
+        "💕",
+        "💞",
+        "💖",
+        "💗",
+        "💓",
+        "💘"
+    ]
+    
+    for heart in love_growth:
+        await msg.edit(heart)
+        await asyncio.sleep(0.2)
+    
+    # Final love message
+    await msg.edit("""💖 LOVE CONQUERS ALL 💖
+❤️🧡💛💚💙💜
+   /\\   /\\
+  /  \\ /  \\
+ /    ❤    \\
+ \\   LOVE   /
+  \\        /
+   \\      /
+    \\    /
+     \\  /
+      \\/
+      
+✨ True Love Never Dies ✨""")
+
+# Bomb Animation
+@client.on(events.NewMessage(pattern='.bomb'))
+async def bomb_cmd(event):
+    msg = event.message
+    
+    # Bomb with timer
+    await msg.edit("💣")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("💣 5...")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("💣 4...")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("💣 3...")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("💣 2...")
+    await asyncio.sleep(0.5)
+    
+    await msg.edit("💣 1...")
+    await asyncio.sleep(0.5)
+    
+    # Explosion sequence
+    explosion_frames = [
+        """💥
+🔥""",
+        """💥💥
+🔥🔥""",
+        """💥💥💥
+🔥🔥🔥""",
+        """💥💥💥💥
+🔥🔥🔥🔥""",
+        """💥💥💥💥💥
+🔥🔥🔥🔥🔥""",
+        """💥💥💥💥💥💥
+🔥🔥🔥🔥🔥🔥""",
+        """💥💥💥💥💥💥💥
+🔥🔥🔥🔥🔥🔥🔥""",
+        """💥💥💥💥💥💥💥💥
+🔥🔥🔥🔥🔥🔥🔥🔥""",
+        """💥💥💥💥💥💥💥💥💥
+🔥🔥🔥🔥🔥🔥🔥🔥🔥""",
+    ]
+    
+    for frame in explosion_frames:
+        await msg.edit(frame)
+        await asyncio.sleep(0.1)
+    
+    # Big explosion
+    await msg.edit("""💥💥💥💥💥💥💥💥💥💥
+💥💥💥💥💥💥💥💥💥💥
+💥💥💥💥💥💥💥💥💥💥
+💥💥💥💥💥💥💥💥💥💥
+💥💥💥💥💥💥💥💥💥💥
+BOOM! 💥""")
+    await asyncio.sleep(0.3)
+    
+    # Explosion clearing
+    await msg.edit("""☁️☁️☁️☁️☁️☁️☁️☁️☁️☁️
+☁️☁️☁️☁️☁️☁️☁️☁️☁️☁️
+☁️☁️☁️☁️☁️☁️☁️☁️☁️☁️
+☁️☁️☁️☁️☁️☁️☁️☁️☁️☁️
+☁️☁️☁️☁️☁️☁️☁️☁️☁️☁️
+Smoke clears...""")
+    await asyncio.sleep(0.5)
+    
+    # Final crater
+    await msg.edit("""🌋 EXPLOSION COMPLETE 🌋
+      
+      /\\
+     /  \\
+    /    \\
+   /      \\
+  /________\\
+  
+⚠️ AREA DESTROYED ⚠️""")
+
+# Clock Animation
+@client.on(events.NewMessage(pattern='.clock'))
+async def clock_cmd(event):
+    msg = event.message
+    
+    # Clock face
+    clock_positions = [
+        """🕐
+  ╲
+   │
+   │""",
+        """🕑
+   ╲
+    ╲
+     │""",
+        """🕒
+    ╲
+     ╲
+      │""",
+        """🕓
+     │
+      ╲
+       ╲""",
+        """🕔
+     │
+      │
+       ╲""",
+        """🕕
+     │
+      │
+       │""",
+        """🕖
+     │
+      │
+     ╱""",
+        """🕗
+     │
+    ╱
+   ╱""",
+        """🕘
+   ╱
+  ╱
+ │""",
+        """🕙
+  ╱
+ ╱
+│""",
+        """🕚
+ ╱
+│
+│""",
+        """🕛
+│
+│
+│"""
+    ]
+    
+    # Show 1 minute of clock ticking
+    for _ in range(5):  # 5 minutes
+        for i, position in enumerate(clock_positions):
+            time_display = f"{i+1:02d}:00" if i < 12 else "12:00"
+            await msg.edit(f"""⏰ ANALOG CLOCK ⏰
+  ┌─────────┐
+  │{position.center(9)}│
+  └─────────┘
+🕰️ {time_display} 🕰️""")
+            await asyncio.sleep(0.2)
+    
+    # Digital clock countdown
+    for i in range(10, 0, -1):
+        await msg.edit(f"""⏱️ COUNTDOWN ⏱️
+┏━━━━━━━━━━━┓
+┃  00:{i:02d}  ┃
+┗━━━━━━━━━━━┛
+Time's running out!""")
+        await asyncio.sleep(0.5)
+    
+    # Alarm ringing
+    await msg.edit("""🔔 ALARM! 🔔
+  ┌───────┐
+  │ 07:30 │
+  └───────┘
+⏰ WAKE UP! ⏰
+💤💤💤💤💤""")
+    await asyncio.sleep(1)
+    
+    # Final clock
+    await msg.edit("""🕰️ TIME NEVER STOPS 🕰️
+  ┌──────────┐
+  │   12    │
+  │11   ☀️  1│
+  │10   │   2│
+  │9    │   3│
+  │  8──┼──4│
+  │7        5│
+  │    6    │
+  └──────────┘
+⏳ Time is precious! ⏳""")
+
+# Train Animation
+@client.on(events.NewMessage(pattern='.train'))
+async def train_cmd(event):
+    msg = event.message
+    
+    # Train approaching
+    await msg.edit("🚂")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("🚂 CHOO CHOO!")
+    await asyncio.sleep(0.3)
+    
+    # Train building
+    train_parts = [
+        "[🚂]",
+        "[🚂][🚃]",
+        "[🚂][🚃][🚃]",
+        "[🚂][🚃][🚃][🚃]",
+        "[🚂][🚃][🚃][🚃][🚃]",
+        "[🚂][🚃][🚃][🚃][🚃][🚃]",
+    ]
+    
+    for part in train_parts:
+        await msg.edit(f"{part}\n▬▬▬▬▬▬▬▬▬")
+        await asyncio.sleep(0.3)
+    
+    # Train moving
+    track = "─" * 50
+    
+    for i in range(20):
+        train_display = f"""{' ' * i}[🚂][🚃][🚃][🚃][🚃][🚃]
+{track}
+🚉 TRAIN IN MOTION 🚉
+SPEED: {60 + i*5} km/h"""
+        await msg.edit(train_display)
+        await asyncio.sleep(0.2)
+    
+    # Train at station
+    await msg.edit("""🚂🛑 TRAIN ARRIVING 🛑🚂
+[🚂][🚃][🚃][🚃][🚃][🚃]
+▬▬▬▬▬▬▬🚉▬▬▬▬▬▬▬
+👥 BOARDING PASSENGERS 👥""")
+    await asyncio.sleep(1)
+    
+    # Train departing
+    await msg.edit("""🚂⚠️ TRAIN DEPARTING ⚠️🚂
+[🚂][🚃][🚃][🚃][🚃][🚃]
+▬▬▬▬▬▬▬🚉▬▬▬▬▬▬▬
+🚶‍♂️🚶‍♀️ ALL ABOARD! 🚶‍♀️🚶‍♂️""")
+    await asyncio.sleep(1)
+    
+    # Final train moving away
+    for i in range(10):
+        spaces = " " * (i * 3)
+        await msg.edit(f"""{spaces}[🚂][🚃][🚃][🚃][🚃][🚃]
+{'─' * 50}
+🚂 CHOO CHOO! FAREWELL! 🚂""")
+        await asyncio.sleep(0.3)
+
+# Party Animation
+@client.on(events.NewMessage(pattern='.party'))
+async def party_cmd(event):
+    msg = event.message
+    
+    # Party starting
+    await msg.edit("🎉")
+    await asyncio.sleep(0.2)
+    
+    await msg.edit("🎉 PARTY!")
+    await asyncio.sleep(0.2)
+    
+    # Confetti
+    confetti = ["🎊", "🎈", "✨", "🥳", "🎆", "🎇"]
+    
+    for _ in range(10):
+        screen = ""
+        for _ in range(3):
+            line = ""
+            for _ in range(8):
+                line += random.choice(confetti) + " "
+            screen += line + "\n"
+        
+        await msg.edit(f"""🥳 PARTY TIME! 🥳
+{screen}
+💃 DANCE 🕺
+🎶 MUSIC 🎵""")
+        await asyncio.sleep(0.3)
+    
+    # Poppers
+    popper_frames = [
+        """🎉 PARTY POPPERS! 🎉
+   🎊
+  🎊🎊
+ 🎊🎊🎊
+🎊🎊🎊🎊""",
+        """🎉 PARTY POPPERS! 🎉
+   ✨
+  ✨✨
+ ✨✨✨
+✨✨✨✨""",
+        """🎉 PARTY POPPERS! 🎉
+   🎈
+  🎈🎈
+ 🎈🎈🎈
+🎈🎈🎈🎈"""
+    ]
+    
+    for _ in range(5):
+        for frame in popper_frames:
+            await msg.edit(frame)
+            await asyncio.sleep(0.2)
+    
+    # Fireworks
+    firework_frames = [
+        """🎆 FIREWORKS! 🎆
+   ✨
+    *""",
+        """🎆 FIREWORKS! 🎆
+   ✨
+  * *""",
+        """🎆 FIREWORKS! 🎆
+   ✨
+ * * *""",
+        """🎆 FIREWORKS! 🎆
+   ✨
+* * * *""",
+        """🎆 FIREWORKS! 🎆
+   💥
+* * * *""",
+        """🎆 FIREWORKS! 🎆
+   🎇
+* * * *"""
+    ]
+    
+    for _ in range(3):
+        for frame in firework_frames:
+            await msg.edit(frame)
+            await asyncio.sleep(0.1)
+    
+    # Final party scene
+    await msg.edit("""🎊🎉🎈 ULTIMATE PARTY! 🎈🎉🎊
+✨✨✨✨✨✨✨✨✨
+🎂🍰🎂🍰🎂🍰🎂🍰🎂
+💃🕺💃🕺💃🕺💃🕺💃
+🎵🎶🎵🎶🎵🎶🎵🎶🎵
+🎆🎇🎆🎇🎆🎇🎆🎇🎆
+
+🥳 HAPPY CELEBRATION! 🥳""")
+
+# Ghost Animation
+@client.on(events.NewMessage(pattern='.ghost'))
+async def ghost_cmd(event):
+    msg = event.message
+    
+    # Ghost appearing
+    await msg.edit("👻")
+    await asyncio.sleep(0.3)
+    
+    await msg.edit("👻 BOO!")
+    await asyncio.sleep(0.3)
+    
+    # Ghost floating
+    ghost_frames = [
+        """👻
+ | 
+/ \\""",
+        """ 👻
+ \\|
+ / \\""",
+        """  👻
+  /|
+ / \\""",
+        """   👻
+   /|
+  / \\""",
+        """    👻
+    /|
+   / \\""",
+        """     👻
+     /|
+    / \\"""
+    ]
+    
+    # Ghost floating right
+    for frame in ghost_frames:
+        await msg.edit(frame)
+        await asyncio.sleep(0.2)
+    
+    # Ghost floating left
+    for frame in reversed(ghost_frames):
+        await msg.edit(frame)
+        await asyncio.sleep(0.2)
+    
+    # Scary ghost
+    await msg.edit("""😱 SCARY GHOST! 😱
+   👻👻👻
+  👻😈👻
+   👻👻👻
+  /|||\\
+ / | | \\
+BOOOO! 👻""")
+    await asyncio.sleep(0.5)
+    
+    # Ghost vanishing
+    vanish_frames = [
+        """👻
+ | 
+/ \\""",
+        """👻
+ |""",
+        """👻""",
+        """✨""",
+        """ """,
+        """💨""",
+        """🌫️"""
+    ]
+    
+    for frame in vanish_frames:
+        await msg.edit(f"GHOST VANISHING...\n{frame}")
+        await asyncio.sleep(0.3)
+    
+    # Final haunted house
+    await msg.edit("""🏚️ HAUNTED HOUSE 🏚️
+   /\\
+  /  \\
+ /____\\
+ | 👻 |
+ |    |
+ |____|
+/      \\
+
+😨 ENTER IF YOU DARE! 😨""")
+    
+
+SYSTEM_PROMPT = """You are replying on behalf of a real human.
+Reply naturally, casually, short.
+Do not mention AI, ChatGPT, bot, assistant.
+Sound like a normal busy person.
+Always talk in hinglish.
+If user abuses, reply with abuse words like madharchod, behenchod, bhosdike, mc, bc, teri maa ki chut, randi ke pille, gandu, lauda mera, teri maa ki, mkc.
+"""
+            
+
+from telethon.tl.functions.phone import CreateGroupCallRequest, JoinGroupCallRequest, LeaveGroupCallRequest
+from telethon.tl.types import InputGroupCall, DataJSON
+import json
+import random
+import asyncio
+
+# Store call data globally
+vc_data = {}
+
+@client.on(events.NewMessage(pattern=r"^\.startvc$"))
+async def start_vc(event):
+    if not is_owner(event): 
+        return
+    await delete_command_message(event)
+    
+    try:
+        msg = await event.reply("🎤 Creating voice chat...")
+        
+        chat = await event.get_chat()
+        
+        # Create voice chat
+        result = await client(CreateGroupCallRequest(
+            peer=chat,
+            random_id=random.randint(0, 2**31-1)
+        ))
+        
+        # Debug: Check what's in result
+        print(f"CreateGroupCall result: {result}")
+        print(f"Result attributes: {dir(result)}")
+        
+        # Different ways to get call ID based on result structure
+        call_id = None
+        access_hash = None
+        
+        # Try different attribute names
+        if hasattr(result, 'call') and hasattr(result.call, 'id'):
+            call_id = result.call.id
+            access_hash = result.call.access_hash
+        elif hasattr(result, 'id'):
+            call_id = result.id
+            access_hash = getattr(result, 'access_hash', 0)
+        elif hasattr(result, 'updates') and len(result.updates) > 0:
+            for update in result.updates:
+                if hasattr(update, 'call'):
+                    call_id = update.call.id
+                    access_hash = update.call.access_hash
+                    break
+        
+        if call_id:
+            # Store call data
+            vc_data[chat.id] = {
+                'call_id': call_id,
+                'access_hash': access_hash
+            }
+            await msg.edit(f"✅ Voice chat created!\nCall ID: `{call_id}`\nNow use `.join`")
+        else:
+            await msg.edit("⚠️ Voice chat created but couldn't get call ID")
+        
+    except Exception as e:
+        await msg.edit(f"❌ Error: {str(e)}")
+
+@client.on(events.NewMessage(pattern=r"^\.join$"))
+async def join_vc(event):
+    if not is_owner(event): 
+        return
+    await delete_command_message(event)
+    
+    try:
+        msg = await event.reply("🎧 Joining voice chat...")
+        
+        chat = await event.get_chat()
+        chat_id = chat.id
+        
+        # Check if we have call data
+        if chat_id not in vc_data:
+            # Try to get active call from chat
+            try:
+                # Get full chat info
+                from telethon.tl.functions.channels import GetFullChannelRequest
+                full = await client(GetFullChannelRequest(chat))
+                
+                if hasattr(full, 'full_chat') and hasattr(full.full_chat, 'call'):
+                    call_id = full.full_chat.call.id
+                    access_hash = full.full_chat.call.access_hash
+                    
+                    vc_data[chat_id] = {
+                        'call_id': call_id,
+                        'access_hash': access_hash
+                    }
+                else:
+                    await msg.edit("❌ No voice chat found. Use `.startvc` first")
+                    return
+                    
+            except:
+                await msg.edit("❌ No voice chat found. Use `.startvc` first")
+                return
+        
+        call_info = vc_data[chat_id]
+        
+        # Prepare call parameters
+        call_data = {
+            "ufrag": "user",
+            "pwd": "pass" + str(random.randint(1000, 9999)),
+            "fingerprints": [],
+            "ssrc": random.randint(1000000, 9999999),
+            "sources": [0]
+        }
+        
+        params = DataJSON(data=json.dumps(call_data))
+        
+        # Join the call
+        result = await client(JoinGroupCallRequest(
+            call=InputGroupCall(
+                id=call_info['call_id'],
+                access_hash=call_info['access_hash']
+            ),
+            join_as=await event.client.get_input_entity('me'),
+            params=params
+        ))
+        
+        await msg.edit("✅ Joined voice chat successfully!")
+        
+    except Exception as e:
+        await msg.edit(f"❌ Join Error: {str(e)[:100]}")
+
+@client.on(events.NewMessage(pattern=r"^\.(leave|left)$"))
+async def leave_vc(event):
+    if not is_owner(event): 
+        return
+    await delete_command_message(event)
+    
+    try:
+        msg = await event.reply("👋 Leaving voice chat...")
+        
+        chat = await event.get_chat()
+        chat_id = chat.id
+        
+        if chat_id not in vc_data:
+            await msg.edit("❌ Not in any voice chat")
+            return
+        
+        call_info = vc_data[chat_id]
+        
+        # Leave the call
+        result = await client(LeaveGroupCallRequest(
+            call=InputGroupCall(
+                id=call_info['call_id'],
+                access_hash=call_info['access_hash']
+            ),
+            source=0
+        ))
+        
+        await msg.edit("✅ Left voice chat!")
+        
+    except Exception as e:
+        await msg.edit(f"❌ Leave Error: {str(e)[:100]}")
+        
+@client.on(events.NewMessage(pattern=r'^\.tts(?:\s+([mf]))?(?:\s+(hindi|eng))?\s+(.+)', outgoing=True))
+async def tts_cmd(event):
+    """Convert text to speech with male/female voice in Hindi or English"""
+    gender = event.pattern_match.group(1) or 'm'  # default male
+    language = event.pattern_match.group(2) or 'eng'  # default english
+    text = event.pattern_match.group(3)
+    reply = await event.get_reply_message()
+    
+    # Delete command message
+    await event.delete()
+    
+    # Send processing message
+    processing_msg = await event.reply("**Converting to speech...**")
+    
+    try:
+        if len(text) > 500:
+            text = text[:500]
+        
+        # Voice mapping
+        if language == 'hindi':
+            voice = 'hi-IN-MadhurNeural' if gender == 'm' else 'hi-IN-SwaraNeural'
+        else:  # english
+            voice = 'en-US-GuyNeural' if gender == 'm' else 'en-US-JennyNeural'
+        
+        filename = f"tts_{event.id}.mp3"
+        
+        await edge_tts.Communicate(text, voice).save(filename)
+        
+        await processing_msg.delete()
+        
+        await client.send_file(
+            event.chat_id,
+            filename,
+            voice_note=True,
+            reply_to=reply.id if reply else None
+        )
+        
+        os.remove(filename)
+        
+    except Exception as e:
+        await processing_msg.edit(f"**TTS Error:** {str(e)}")
+        await asyncio.sleep(3)
+        await processing_msg.delete()
+        if os.path.exists(filename):
+            os.remove(filename)
+
+@client.on(events.NewMessage(pattern=r'^\.report(?:\s+(\d+))?', outgoing=True))
+async def report_cmd(event):
+    """Report message multiple times to Telegram"""
+    reply = await event.get_reply_message()
+    
+    if not reply:
+        await event.edit("❌ **Please reply to a message to report it!**")
+        await asyncio.sleep(3)
+        await event.delete()
+        return
+    
+    # Parse count (default 1, max 20)
+    count = int(event.pattern_match.group(1) or 1)
+    if count > 20:
+        count = 20
+    
+    # Send processing message
+    processing = await event.edit(f"📢 **Reporting message {count} time(s)...**")
+    
+    try:
+        success = 0
+        for i in range(count):
+            try:
+                await client(ReportRequest(
+                    peer=await event.get_input_chat(),
+                    id=[reply.id],
+                    reason=InputReportReasonSpam(),
+                    message=f"Report #{i+1} via userbot"
+                ))
+                success += 1
+                await asyncio.sleep(0.5)  # Small delay between reports
+            except:
+                pass
+        
+        if success > 0:
+            await processing.edit(f"✅ **Message reported {success} time(s) successfully!**")
+        else:
+            await processing.edit("❌ **Failed to report message!**")
+            
+    except Exception as e:
+        await processing.edit(f"❌ **Report Error:** `{str(e)}`")
+    
+    await asyncio.sleep(3)
+    await event.delete()
+    
+@client.on(events.NewMessage(pattern=r'^\.unpin(?: |$)(.*)', outgoing=True))
+async def unpin_cmd(event):
+    """Unpin a specific message or all"""
+    args = event.pattern_match.group(1)
+    reply = await event.get_reply_message()
+    
+    try:
+        if args == "all":
+            await client.unpin_message(event.chat_id, None)
+            await event.edit("**📌 All messages unpinned!**")
+        elif reply:
+            await client.unpin_message(event.chat_id, reply.id)
+            await event.edit("**📌 Message unpinned!**")
+        else:
+            # Unpin latest pinned message
+            await client.unpin_message(event.chat_id)
+            await event.edit("**📌 Latest pinned message removed!**")
+        
+        await asyncio.sleep(2)
+        await event.delete()
+    except Exception as e:
+        await event.edit(f"**Failed to unpin:** {str(e)}")
+        
+@client.on(events.NewMessage(pattern=r'^\.pin(?: |$)(.*)', outgoing=True))
+async def pin_cmd(event):
+    """Pin a message (silently if -s flag used)"""
+    reply = await event.get_reply_message()
+    if not reply:
+        await event.edit("**Reply to a message to pin it!**")
+        return
+    
+    args = event.pattern_match.group(1)
+    silent = "-s" in args or "--silent" in args
+    
+    try:
+        await client.pin_message(
+            event.chat_id,
+            reply.id,
+            notify=not silent
+        )
+        await event.edit(f"**📌 Message pinned!** {'(silently)' if silent else ''}")
+        await asyncio.sleep(2)
+        await event.delete()
+    except Exception as e:
+        await event.edit(f"**Failed to pin:** {str(e)}")
+    
+@client.on(events.NewMessage(pattern=r'^\.ss(?: |$)(.*)', outgoing=True))
+async def screenshot_cmd(event):
+    """Take website screenshot"""
+    url = event.pattern_match.group(1)
+    if not url:
+        await event.edit("**Usage:** `.ss https://google.com`")
+        return
+    
+    if not url.startswith('http'):
+        url = 'https://' + url
+    
+    await event.edit("**Taking screenshot...**")
+    
+    try:
+        # Using external API
+        api_url = f"https://image.thum.io/get/width/800/crop/600/{url}"
+        
+        await client.send_file(
+            event.chat_id,
+            api_url,
+            caption=f"**Screenshot of:** {url}",
+            reply_to=event.reply_to_msg_id
+        )
+        await event.delete()
+    except:
+        await event.edit("**Failed to capture screenshot!**")
+
+
+        
+import pyfiglet
+
+@client.on(events.NewMessage(pattern=r'^\.ascii(?:\s+(.+))?', outgoing=True))
+async def ascii_cmd(event):
+    """Convert text to ASCII art"""
+    text = event.pattern_match.group(1)
+    reply = await event.get_reply_message()
+    
+    if not text and not reply:
+        await event.edit("""
+**ASCII Art Generator**
+
+**Usage:**
+`.ascii Hello World`
+`.ascii slant Telegram`
+`.ascii big Python`
+
+**Available fonts:** `standard`, `slant`, `big`, `block`, `bubble`
+        """)
+        return
+    
+    # Parse font if specified
+    fonts = ['standard', 'slant', 'big', 'block', 'bubble', 'digital']
+    font = 'standard'
+    
+    if text:
+        parts = text.split(' ', 1)
+        if parts[0].lower() in fonts:
+            font = parts[0].lower()
+            if len(parts) > 1:
+                text = parts[1]
+            else:
+                text = ""
+    
+    # Get text from reply if no text provided
+    if not text and reply:
+        text = reply.text or reply.caption or ""
+    
+    if not text:
+        await event.edit("**❌ Please provide text to convert!**")
+        return
+    
+    # Limit text length
+    if len(text) > 20:
+        text = text[:20]
+        await event.edit("**⚠️ Text too long, truncated to 20 characters**")
+    
+    try:
+        # Generate ASCII art
+        ascii_art = pyfiglet.figlet_format(text, font=font)
+        
+        # Check if ASCII art is too long for Telegram
+        if len(ascii_art) > 4000:
+            # Split into parts
+            parts = [ascii_art[i:i+4000] for i in range(0, len(ascii_art), 4000)]
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await event.edit(f"**ASCII Art ({font}):**\n```{part}```")
+                else:
+                    await event.respond(f"```{part}```")
+        else:
+            await event.edit(f"**ASCII Art ({font}):**\n```{ascii_art}```")
+    
+    except Exception as e:
+        await event.edit(f"**❌ Error:** `{str(e)}`\n**Try:** `.ascii` for help")
+        
+@client.on(events.NewMessage(pattern=r'^\.demote(?:\s+@?(\w+))?', outgoing=True))
+async def demote_cmd(event):
+    """Remove admin rights from user"""
+    reply = await event.get_reply_message()
+    
+    # Get username from message or reply
+    username = event.pattern_match.group(1)
+    
+    if not username and not reply:
+        await event.edit("**Usage:** `.demote @username` or reply to admin")
+        return
+    
+    try:
+        # Get user entity
+        if username:
+            user = await client.get_entity(username)
+        else:
+            user = await client.get_entity(reply.sender_id)
+        
+        # Remove all admin rights (empty rights)
+        no_rights = ChatAdminRights(
+            change_info=False,
+            post_messages=False,
+            edit_messages=False,
+            delete_messages=False,
+            ban_users=False,
+            invite_users=False,
+            pin_messages=False,
+            add_admins=False,
+            anonymous=False,
+            manage_call=False,
+            other=False
+        )
+        
+        # Demote user
+        await client(EditAdminRequest(
+            channel=event.chat_id,
+            user_id=user.id,
+            admin_rights=no_rights,
+            rank=""  # Empty title
+        ))
+        
+        await event.edit(f"**✅ Successfully demoted [{user.first_name}](tg://user?id={user.id})!**")
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "USER_NOT_PARTICIPANT" in error_msg:
+            await event.edit("**❌ User is not in this chat!**")
+        elif "USER_ADMIN_INVALID" in error_msg:
+            await event.edit("**❌ Can't demote this user!**")
+        elif "CHAT_ADMIN_REQUIRED" in error_msg:
+            await event.edit("**❌ You need admin rights to demote!**")
+        elif "USER_ID_INVALID" in error_msg:
+            await event.edit("**❌ Invalid user specified!**")
+        else:
+            await event.edit(f"**❌ Error:** `{error_msg}`")
+            
+@client.on(events.NewMessage(pattern=r'^\.promote(?:\s+@?(\w+))?(?:\s+(.*))?', outgoing=True))
+async def promote_cmd(event):
+    """Promote user to admin with optional title"""
+    reply = await event.get_reply_message()
+    
+    # Get username from message or reply
+    username = event.pattern_match.group(1)
+    custom_title = event.pattern_match.group(2)
+    
+    if not username and not reply:
+        await event.edit("**Usage:** `.promote @username [title]` or reply to user")
+        return
+    
+    try:
+        # Get user entity
+        if username:
+            user = await client.get_entity(username)
+        else:
+            user = await client.get_entity(reply.sender_id)
+        
+        # Define admin rights (you can customize these)
+        admin_rights = ChatAdminRights(
+            change_info=True,      # Can change chat info
+            post_messages=True,    # Can post messages (for channels)
+            edit_messages=True,    # Can edit messages
+            delete_messages=True,  # Can delete messages
+            ban_users=True,        # Can ban users
+            invite_users=True,     # Can invite users
+            pin_messages=True,     # Can pin messages
+            add_admins=True,       # Can add other admins
+            anonymous=False,       # Can send messages anonymously
+            manage_call=True,      # Can manage voice calls
+            other=True             # Other admin rights
+        )
+        
+        # Promote user
+        await client(EditAdminRequest(
+            channel=event.chat_id,
+            user_id=user.id,
+            admin_rights=admin_rights,
+            rank=custom_title or "Admin"  # Admin title
+        ))
+        
+        # Success message
+        title_text = f" as **{custom_title}**" if custom_title else ""
+        await event.edit(f"**✅ Successfully promoted [{user.first_name}](tg://user?id={user.id}){title_text}!**")
+        
+    except Exception as e:
+        error_msg = str(e)
+        if "USER_NOT_PARTICIPANT" in error_msg:
+            await event.edit("**❌ User is not in this chat!**")
+        elif "USER_ADMIN_INVALID" in error_msg:
+            await event.edit("**❌ Can't promote this user!**")
+        elif "CHAT_ADMIN_REQUIRED" in error_msg:
+            await event.edit("**❌ You need admin rights to promote!**")
+        elif "USER_ID_INVALID" in error_msg:
+            await event.edit("**❌ Invalid user specified!**")
+        else:
+            await event.edit(f"**❌ Error:** `{error_msg}`")
+            
+# Dictionary to store active fights
+active_fights = {}  # {target_user_id: True/False}
+
+@client.on(events.NewMessage(pattern=r'^type$', outgoing=True))
+async def typefight_start(event):
+    """Start typefight silently"""
+    
+    if not event.is_reply:
+        # Silent fail - kuch nahi hoga
+        await event.delete()
+        return
+    
+    # Get target user
+    reply_msg = await event.get_reply_message()
+    target_user = reply_msg.sender_id
+    
+    # Check if already fighting
+    if target_user in active_fights and active_fights[target_user]:
+        await event.delete()
+        return
+    
+    # Start fight silently
+    active_fights[target_user] = True
+    
+    
+    # Create listener for target user
+    @client.on(events.NewMessage(incoming=True))
+    async def fight_listener(listener_event):
+        # Skip if not from target or fight ended
+        if listener_event.sender_id != target_user or not active_fights.get(target_user, False):
+            return
+        
+        # Send random roast
+        roast = random.choice(abuse_roast)
+        await listener_event.reply(roast)
+        
+        # Small delay to avoid rate limit
+        await asyncio.sleep(1.5)
+    
+    # Store listener reference
+    if not hasattr(client, 'fight_listeners'):
+        client.fight_listeners = {}
+    if target_user not in client.fight_listeners:
+        client.fight_listeners[target_user] = []
+    client.fight_listeners[target_user].append(fight_listener)
+
+@client.on(events.NewMessage(pattern=r'^end$', outgoing=True))
+async def typefight_stop(event):
+    """Stop typefight silently"""
+    
+    if not event.is_reply:
+        await event.delete()
+        return
+    
+    # Get target user
+    reply_msg = await event.get_reply_message()
+    target_user = reply_msg.sender_id
+    
+    # Stop fight
+    if target_user in active_fights:
+        active_fights[target_user] = False
+        del active_fights[target_user]
+    
+    # Remove listeners
+    if hasattr(client, 'fight_listeners') and target_user in client.fight_listeners:
+        for listener in client.fight_listeners[target_user]:
+            client.remove_event_handler(listener)
+        del client.fight_listeners[target_user]
+    
+    # Delete command message
+    await event.delete()
+    
 # ------------- SETTINGS -----------------
 MAX_PER_RUN = 10000000000000000
 DELAY_SECONDS = 6  # 🔥 DEFAULT DELAY 6 SECONDS FOR ALL COMMANDS
-TAG_DELAY = 6      # 🔥 TAG COMMANDS DELAY
+TAG_DELAY = 4      # 🔥 TAG COMMANDS DELAY
 
 # ----------- MESSAGES DATA --------------
 
 # 🔥 BOYS ROAST LINES
 boys_roast = [
-"**., TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
+"**BHAI, TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
     "**TERE JAISE LOGON KO DEKHKAR HI MUTE BUTTON KA INVENTION HUA THA!** 🔇",
-    "**., TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
+    "**BHAI, TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
     "**TU APNE GHAR KA WiFi PASSWORD HAI – SABKO YAAD HAI PAR KISI KAAM KA NAHI!** 📶",
-    "**. TU TOH WALKING CRINGE CONTENT HAI!** 😬",
+    "**BHAI TU TOH WALKING CRINGE CONTENT HAI!** 😬",
     "**TERI PHOTO DEKHKAR CAMERA BHI APNA LENS BAND KAR LETA HAI!** 📸",
-    "**. TU EK CHALTA PHIRTA BUG HAI.** 🐛",
+    "**BHAI TU EK CHALTA PHIRTA BUG HAI.** 🐛",
     "**TU HERO NAHI, SIRF ERROR 404 KA EXAMPLE HAI.** ❌",
 "**TERE JOKES SE CALCULATOR BHI CONFUSE HO JAYE.** 🧮",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
-"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU EK BROKEN LINK HO.** 🔗",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
-"., TERI SHAKAL DEKHKE LAGTA HAI BHAGWAN NE BHI TRIAL VERSION MEIN BANAYA THA. 🤡"
-"TERE JAISE LOGON KE LIYE HI 'BLOCK' BUTTON BANA HAI. 🚫"
-"., TU ITNA FAKE HAI KI TERA SNAPCHAT FILTER BHI EMBARRASS HO JAYE. 🎭"
-"TERI AWAAZ SUNKE LAGTA HAI — MIC NE BHI MUTE KARNA SEEKH LIYA. 🎤🔇"
-"., TU EK CHALTA PHIRTA 'TERMS AND CONDITIONS' HAI — KOI PADHTA NAHI, SAB SKIP KAR DETE HAIN. 📄"
-"TERI PHOTO DEKHKE FACEBOOK NE 'LOW QUALITY CONTENT' KA TAG DIYA. 📸"
-"., TERA DIMAAG HAI YA PENDING UPDATE KA NOTIFICATION? ⏳"
-"TU HERO NAHI, SIRF EK 'SKIP INTRO' BUTTON KA EXAMPLE HAI. ⏭️"
-"TERI BAATEIN SUNKE LAGTA HAI — YOUTUBE KI UNWANTED AD CHAL RAHI HAI. 📺"
-"., TERA EXISTENCE EK '404 NOT FOUND' PAGE JAISA HAI. ❌"
-"TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE RESTORE KARNE SE MUKAR GAYA. 🗑️"
-"., TERA CONFIDENCE AUR TERA TALENT — DONO ALAG ZIP CODES MEIN REHTE HAIN. 🏘️"
-"TERI SHAKAL DEKHKE LAGTA HAI — NATURE NE BHI GALTI KAR DI. 🌍"
-"., TU ITNA SLOW HAI KI GHONGHE NE TUJHE RACE MEIN HARAYA. 🐌"
-"TERI SUCCESS AUR TERI REALITY — DONO MEIN KABHI FLIGHT CANCELLATION HO JATI HAI. ✈️"
-"., TU EK 'LOADING…' JAISA HAI — KABHI COMPLETE NAHI HOTA. 🔄"
-"TERI PERSONALITY CHECK KIYA — 'FILE CORRUPTED' ERROR AAYA. 🖥️"
-"., TU ITNA IRRELEVANT HAI KI GOOGLE MAPS PE BHI 'NO DATA' DIKHTA HAI. 🗺️"
-"TERI EXISTENCE EK TYPO HAI — GALAT JAGAH, GALAT TIME, GALAT PERSONALITY. ⌨️"
-"., TU ITNA 'UNIQUE' HAI KI AVERAGE BHI TUJHE CHODKAR BHAG GAYA. 🏃"
-"TERI BAATON MEIN DUM NAHI, SIRF BACKGROUND NOISE HAI. 🔊"
-"., TU ITNA DESPERATE HAI KI LIKES KE LIYE KHUD KO MEME BANA DIYA. 🤡❤️"
-"TERI PHOTO DEKHKE INSTAGRAM NE 'REPORT' OPTION RECOMMEND KIYA. 📱🚩"
-"., TERA FUTURE PLAN AUR TERA PAST DONO SAME HAIN — DARK AUR UNCLEAR. 🌑"
-"TU ITNA OVERCONFIDENT HAI KI FAILURE BHI TUJHSE EMBARRASSED HAI. 📉😳"
-"TERI LIFE EK FLOP MOVIE KI TARAH HAI — INTERVAL KE BAAD KOI AATA HI NAHI. 🎬"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'BEFORE USE' WALA EXAMPLE HAI. 🧼"
-"., TU ITNA SELF-OBSESSED HAI KI KHUD SE SELFI LETE WAQT BHI FILTER LAGATA HAI. 🤳"
-"TERI BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN — KOI PADHTA NAHI, SAB HATATE HAIN. 🔔"
-"., TU EK CHALTA PHIRTA BUFFERING SYMBOL HAI. ⏳"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'AFTER EFFECTS' KA GALAT EXAMPLE HAI. 🎨"
-"., TERA EGO AUR TERA IQ — DONO ULTRA PRO MAX LEVEL PE HAIN PAR DIRECTION GALAT HAI. 🧠"
-"TERI SUCCESS KA GRAPH DEKHA TOH LAGA — YEH TOH 'FALLING' KA NEW RECORD HAI. 📉"
-"., TU ITNA 'MAIN CHARACTER' HAI KI BACKGROUND MUSIC BHI TUJHE IGNORE KARTA HAI. 🎵"
-"TERI PERSONALITY AUR TERI REALITY — DONO MEIN 5G SPEED KA DIFFERENCE HAI. 📶"
-"., TERA EXISTENCE EK 'WARNING LABEL' DESERVE KARTA HAI — 'USE AT YOUR OWN RISK'. ⚠️"
-"TERI AWAAZ SUNKE SIRI BHI 'I DON'T UNDERSTAND' BOLTI HAI. 📱🤷"
-"., TU ITNA FAKE HAI KI CHATGPT BHI TERA REPLY NAHI KARTA. 🤖"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'PHOTOSHOP' KA 'BEFORE' WALA PART HAI. 🖼️"
-"., TU EK CHALTA PHIRTA 'TERMS AND CONDITIONS' HAI — IMPORTANT NAHI, IRRITATING ZAROOR. 📄"
-"TERI BAATON MEIN WEIGHT NAHI, SIRF LENGTH HAI. 📏"
-"., TERA CONFIDENCE AUR TERA SKILL — DONO ALAG GENERATION KE HAIN. 📱"
-"TERI PHOTO DEKHKE CAMERA NE 'LOW LIGHT WARNING' DI. 📸⚠️"
-"., TU ITNA SLOW HAI KI DIAL-UP INTERNET BHI TUJHE FAST LAGTA HAI. 🐢"
-"TERI EXISTENCE EK 'SPAM FOLDER' JAISI HAI — KABHI OPEN NAHI HOTI. 📂"
-"., TU HERO NAHI, SIRF EK 'ERROR 502' KA EXAMPLE HAI. 🌐"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'FACEBOOK' KA OLD PROFILE PICTURE HAI. 📘"
-"., TERA DIMAAG HAI YA 'STORAGE FULL' KA NOTIFICATION? 📱"
-"TERI BAATEIN SUNKE LAGTA HAI — TU 'YOUTUBE' KA 'SKIP AD' WALA PART HAI. ⏭️"
-"., TU ITNA 'POSITIVE' HAI KI TERI POSITIVITY BHI NEGATIVE LAGTI HAI. 🧘"
-"TERI SUCCESS AUR TERI LIFE — DONO MEIN 'CONNECTION LOST' HO JATA HAI. 📶"
-"., TU EK CHALTA PHIRTA 'BUG' HAI — FIX HONA CHAHIYE. 🐛"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'FACETUNE' KA 'BEFORE' WALA VERSION HAI. 🎨"
-"., TERA PRESENCE DEKHKE LOG SOCHTE HAIN — 'YEH BANDA KYUN HAI YAHAN'? 🧐"
-"TERI BAATON MEIN DUM NAHI, SIRF 'AIR' HAI. 💨"
-"., TU ITNA IRRELEVANT HAI KI TERA BIRTH CERTIFICATE BHI 'DRAFT' MODE MEIN HAI. 📄"
-"TERI PHOTO DEKHKE LAGTA HAI — TU 'FILTER' KA 'AFTER' WALA PART BHUL GAYA. 📸"
-"., TERA FUTURE AUR TERA PRESENT — DONO MEIN 'LOADING' CHAL RAHA HAI. ⏳"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'GOOGLE IMAGES' KA 'LOW RES' WALA PART HAI. 🖼️"
-"., TU EK CHALTA PHIRTA 'GLITCH' HAI — SYSTEM SE BAHR NIKAL. 🖥️"
-"TERI AWAAZ SUNKE LAGTA HAI — TU 'AUDIO' KA 'MUTED' VERSION HAI. 🔇"
-"., TERA EXISTENCE EK 'JOKE' HAI — PAR MazaK KISKO AATA HAI? 🃏"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'NATURE' KA 'REJECTED' VERSION HAI. 🌿"
-"., TU ITNA 'COOL' BANNA CHAHTA HAI JAISE 'FREEZE' BUTTON DAB GAYA HO. ❄️"
-"TERI BAATEIN SUNKE LAGTA HAI — TU 'GOOGLE TRANSLATE' KA 'WRONG' VERSION HAI. 🌐"
-"., TERA CONFIDENCE AUR TERA REALITY — DONO MEIN '5G' KA DIFFERENCE HAI. 📶"
-"TERI PHOTO DEKHKE LAGTA HAI — TU 'PHOTOSHOOT' KA 'BLOOPER' WALA PART HAI. 🎬"
-"., TU EK CHALTA PHIRTA 'POP-UP AD' HAI — SAB BAND KAR DETE HAIN. 🚫"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'MIRROR' KA 'CRACKED' VERSION HAI. 🪞"
-"., TERA DIMAAG HAI YA 'PENDING INSTALLATION'? 📲"
-"TERI EXISTENCE EK 'RECYCLE BIN' KA 'PERMANENT' WALA PART HAI. 🗑️"
-"., TU ITNA 'UNIQUE' HAI KI 'BEING AVERAGE' BHI TUJHE 'EXCLUSIVE' LAGTA HAI. 🦄"
-"TERI BAATEIN SUNKE LAGTA HAI — TU 'SIRI' KA 'GLITCH' WALA VERSION HAI. 🍎"
-"., TERA PRESENCE DEKHKE LOG 'DO NOT DISTURB' MODE ON KAR DETE HAIN. 📵"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'ADOBE' KA 'TRIAL' VERSION HAI. 🎨"
-"., TERA CAREER GRAPH AUR TERI HEIGHT — DONO SAME HAIN — BAS BARABAR NAHI BADHE. 📉"
-"TERI PHOTO DEKHKE LAGTA HAI — TU 'INSTAGRAM' KA 'ARCHIVED' WALA PART HAI. 📸"
-"., TU EK CHALTA PHIRTA 'ERROR 404' HAI — MILA HI NAHI. 🔍"
-"TERI AWAAZ SUNKE LAGTA HAI — TU 'AUDIO' KA 'CORRUPTED' FILE HAI. 🎵"
-"., TERA EXISTENCE EK 'TRIAL VERSION' HAI — EXPIRE KAB HO RAHA HAI? ⏳"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'PAINT' MEIN BANAYA GAYA '3D' MODEL HAI. 🎨"
-"., TERA CONFIDENCE AUR TERA SKILL — DONO MEIN 'LATENCY' HAI. 🎮"
-"TERI BAATEIN SUNKE LAGTA HAI — TU 'CHATGPT' KA 'BETA' VERSION HAI. 🤖"
-"., TU ITNA 'MAIN CHARACTER' HAI KI LOG TUJHE 'BACKGROUND' MEIN BHI IGNORE KARTE HAIN. 👥"
-"TERI PHOTO DEKHKE LAGTA HAI — TU 'SNAPCHAT' KA 'FILTER' BHUL GAYA. 👻"
-"., TERA DIMAAG HAI YA 'LOW BATTERY' KA WARNING? 🔋"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'ZOOM' KA 'BLUR BACKGROUND' WALA PART HAI. 🖥️"
-"., TU EK CHALTA PHIRTA 'SPAM' HAI — BLOCK HONE KA INTZAAR KAR RAHA. 🚫"
-"TERI EXISTENCE EK 'NOTIFICATION' JAISI HAI — KOI OPEN NAHI KARTA. 🔔"
-"., TU ITNA 'FAKE' HAI KI 'REALITY' BHI TUJHSE DUR BHAGTI HAI. 🏃"
-"TERI AWAAZ SUNKE LAGTA HAI — TU 'YOUTUBE' KA 'MUTED' WALA AD HAI. 📺"
-"., TERA PRESENCE DEKHKE LOG 'SKIP' BUTTON DHUNDHTE HAIN. ⏭️"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'PHOTOSHOP' KA 'LAYER' BHUL GAYA. 🖼️"
-"., TERA CAREER AUR TERI LIFE — DONO 'AIRPLANE MODE' MEIN HAIN. ✈️"
-"TERI BAATEIN SUNKE LAGTA HAI — TU 'GOOGLE' KA 'NO RESULTS' WALA PAGE HAI. 🔍"
-"., TU EK CHALTA PHIRTA 'BUFFERING' HAI — COMPLETE KAB HOGA? ⏳"
-"TERI PHOTO DEKHKE LAGTA HAI — TU 'CAMERA' KA 'LENS CAP' BHUL GAYA. 📸"
-"., TERA CONFIDENCE AUR TERI REALITY — DONO 'OFFLINE' HAIN. 📴"
-"TERI SHAKAL DEKHKE LAGTA HAI — TU 'BHAGWAN' KA 'MISTAKE' WALA PART HAI. 😇"
-"., TU HERO NAHI, SIRF EK 'CAPTCHA' HAI — HAR KOI TUJHE 'SKIP' KARTA HAI. 🤖"
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU EK OFFLINE FILE JAISA HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
+"**BHAI TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MEMBER HO WHATSAPP GROUP KA.** 🔇",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LIFE KA BETA VERSION HAI.** 🧪",
+"**BHAI TU LIFE KA BETA VERSION HAI.** 🧪",
 "**TU EK CHALTA PHIRTA CAPTCHA HAI.** 🔢",
 "**TERE BAATEIN BACKGROUND NOISE JAISI HAI.** 🎧",
 "**TU CHALTA PHIRTA DEMO ACCOUNT HAI.** 📝",
-"**. TU WALKING ERROR MESSAGE HO.** ❌",
+"**BHAI TU WALKING ERROR MESSAGE HO.** ❌",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE LOGIC KE AAGE CALCULATOR BHI FAIL HO JAYE.** 🧮",
 "**TU EK CANCELLED DOWNLOAD KA EXAMPLE HAI.** ⬇️",
-"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU LIFE KA GLITCH HO.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
+"**BHAI TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎬",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HO – SABKO SKIP KARNA HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HO – SAB IGNORE KARTE HAI.** 📅",
-"**. TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HO.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HO JO HAMESHA CRASH HOTI HAI.** 📱",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**. TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
+"**BHAI TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
 "**TU EK CRASHED APP HAI – KABHI OPEN NAHI HOTA.** 📱",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**. TU LIFE KA BUG REPORT HAI.** 🐛",
+"**BHAI TU LIFE KA BUG REPORT HAI.** 🐛",
 "**TU EK FORWARDED MESSAGE JAISA HAI – IGNORE KARTA SABKO.** 📩",
 "**TERE HAIRSTYLE SE BARBER BHI SHOCK HO JAYE.** 💇‍♂️",
 "**TU CHALTA PHIRTA CAPTCHA HAI – SABKO CONFUSE KARTA.** 🔢",
-"**. TU LOW BATTERY ALERT HAI.** 🔋",
+"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU EK CANCELLED CALL HO – KOI NAHI SUNTA.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN BHI PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA POSTER HAI.** 🖼️",
-"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO ACCOUNT HAI – INCOMPLETE AUR USELESS.** 📝",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU WALKING TYPO HAI.** ✏️",
-"**. TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
+"**BHAI TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF TEASER VIDEO KA CLIP HAI.** 🎬",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**. TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
+"**BHAI TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU EK WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HAI – SAB IGNORE KARTE HAIN.** 📅",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HAI JO HAMESHA CRASH HOTI HAI.** 📱",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
-"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU CHALTA PHIRTA WIFI ERROR HAI.** 📶",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TU EK WALKING TYPO HAI.** ✏️",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HAI – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**. TU LOW BATTERY ALERT HAI.** 🔋",
+"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – KOI NAHI DEKHTA.** 📄",
 "**TERE UPDATES HAMESHA PENDING HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAIN.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**. TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
+"**BHAI TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🖱️",
 "**TERE BAAT KARTE HI SABKO LAGTA HAI SPAM CALL AAYI.** 📞",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-    "**., TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
+    "**BHAI, TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
     "**TERE JAISE LOGON KO DEKHKAR HI MUTE BUTTON KA INVENTION HUA THA!** 🔇",
-    "**., TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
+    "**BHAI, TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
     "**TU APNE GHAR KA WiFi PASSWORD HAI – SABKO YAAD HAI PAR KISI KAAM KA NAHI!** 📶",
-    "**. TU TOH WALKING CRINGE CONTENT HAI!** 😬",
+    "**BHAI TU TOH WALKING CRINGE CONTENT HAI!** 😬",
     "**TERI PHOTO DEKHKAR CAMERA BHI APNA LENS BAND KAR LETA HAI!** 📸",
-    "**. TU CHAI KI PYALI KI TARAH HAI – GARAM HAI PAR KISI KO PASAND NAHI!** ☕",
+    "**BHAI TU CHAI KI PYALI KI TARAH HAI – GARAM HAI PAR KISI KO PASAND NAHI!** ☕",
     "**TERE JAISE LOGON KE LIYE HI BLOCK BUTTON BANA HAI!** 🚫",
-    "**. TU INSTAGRAM REELS KI TARAH HAI – 15 SECOND MEIN BORING!** ⏱️",
+    "**BHAI TU INSTAGRAM REELS KI TARAH HAI – 15 SECOND MEIN BORING!** ⏱️",
     "**TERE DIMAG KI SPEED 2G HAI – LOAD HONE MEIN 10 SAAL LAGTE HAIN!** 🐌"
 ]
 
@@ -1279,7 +7071,7 @@ abuse_roast = [
     "u|   TUJHE AB TAK NAHI SMJH AYA KI MAI HI HU TUJHE PAIDA KARNE WALA BHOSDIKEE APNI MAA SE PUCH RANDI KE BACHEEEE 🤩👊👤😍",
     "uM   TERI MAA KE BHOSDE MEI SPOTIFY DAL KE LOFI BAJAUNGA DIN BHAR 😍🎶🎶💥",
     "JUNGLE ME NACHTA HE MORE TERI MAAKI CHUDAI DEKKE SAB BOLTE ONCE MORE ONCE MORE 🤣🤣💦💋�I   GALI GALI ME REHTA HE SAND TERI MAAKO CHOD DALA OR BANA DIA RAND 🤤🤣�",
-    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE . DEDIYA",
+    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE BHAI DEDIYA",
     "MAA KAA BJSODAAA� MADARXHODDDz TERIUUI MAAA KAA BHSODAAAz-TERIIIIII BEHENNNN KO CHODDDUUUU MADARXHODDDDz NIKAL MADARCHODz RANDI KE BACHEz TERA MAA MERI FANz TERI SEXY BAHEN KI CHUT",
     "BETE TU BAAP SE LEGA PANGA TERI MAAA KO CHOD DUNGA KARKE NANGA 💦💋",
     "CHAL BETA TUJHE MAAF KIA 🤣 ABB APNI GF KO BHEJ",
@@ -1442,7 +7234,7 @@ abuse_roast = [
     "**SUAR KE BACHHE!** 🐖",
     "**GAANDU!** 🍑",
     "**LODE!** 🍆"
-    "**.NS KI AULAAD!** 🐃",
+    "**BHAINS KI AULAAD!** 🐃",
     "**KUTTE KE PILLE!** 🐕",
     "**SUAR KE BACHHE!** 🐖",
     "**GAANDU!** 🍑",
@@ -4191,7 +9983,7 @@ reply_raid_lines = [
     "u|   TUJHE AB TAK NAHI SMJH AYA KI MAI HI HU TUJHE PAIDA KARNE WALA BHOSDIKEE APNI MAA SE PUCH RANDI KE BACHEEEE 🤩👊👤😍",
     "uM   TERI MAA KE BHOSDE MEI SPOTIFY DAL KE LOFI BAJAUNGA DIN BHAR 😍🎶🎶💥",
     "JUNGLE ME NACHTA HE MORE TERI MAAKI CHUDAI DEKKE SAB BOLTE ONCE MORE ONCE MORE 🤣🤣💦💋�I   GALI GALI ME REHTA HE SAND TERI MAAKO CHOD DALA OR BANA DIA RAND 🤤🤣�",
-    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE . DEDIYA",
+    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE BHAI DEDIYA",
     "MAA KAA BJSODAAA� MADARXHODDDz TERIUUI MAAA KAA BHSODAAAz-TERIIIIII BEHENNNN KO CHODDDUUUU MADARXHODDDDz NIKAL MADARCHODz RANDI KE BACHEz TERA MAA MERI FANz TERI SEXY BAHEN KI CHUT",
     "BETE TU BAAP SE LEGA PANGA TERI MAAA KO CHOD DUNGA KARKE NANGA 💦💋",
     "CHAL BETA TUJHE MAAF KIA 🤣 ABB APNI GF KO BHEJ",
@@ -6751,407 +12543,407 @@ raid_shayari_lines = [
 
 # 🔥 ROAST BOY RAID LINES
 roast_boy_raid_lines = [
-"**., TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
+"**BHAI, TU APNE AAPKO HERO SAMAJHTA HAI!** 🤡",
     "**TERE JAISE LOGON KO DEKHKAR HI MUTE BUTTON KA INVENTION HUA THA!** 🔇",
-    "**., TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
+    "**BHAI, TU ITNA USELESS HAI KI RECYCLE BIN BHI TUJHE ACCEPT NAHI KAREGA!** 🗑️",
     "**TU APNE GHAR KA WiFi PASSWORD HAI – SABKO YAAD HAI PAR KISI KAAM KA NAHI!** 📶",
-    "**. TU TOH WALKING CRINGE CONTENT HAI!** 😬",
+    "**BHAI TU TOH WALKING CRINGE CONTENT HAI!** 😬",
     "**TERI PHOTO DEKHKAR CAMERA BHI APNA LENS BAND KAR LETA HAI!** 📸",
-    "**. TU EK CHALTA PHIRTA BUG HAI.** 🐛",
+    "**BHAI TU EK CHALTA PHIRTA BUG HAI.** 🐛",
     "**TU HERO NAHI, SIRF ERROR 404 KA EXAMPLE HAI.** ❌",
 "**TERE JOKES SE CALCULATOR BHI CONFUSE HO JAYE.** 🧮",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
-"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU EK BROKEN LINK HO.** 🔗",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU EK OFFLINE FILE JAISA HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
+"**BHAI TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MEMBER HO WHATSAPP GROUP KA.** 🔇",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LIFE KA BETA VERSION HAI.** 🧪",
+"**BHAI TU LIFE KA BETA VERSION HAI.** 🧪",
 "**TU EK CHALTA PHIRTA CAPTCHA HAI.** 🔢",
 "**TERE BAATEIN BACKGROUND NOISE JAISI HAI.** 🎧",
 "**TU CHALTA PHIRTA DEMO ACCOUNT HAI.** 📝",
-"**. TU WALKING ERROR MESSAGE HO.** ❌",
+"**BHAI TU WALKING ERROR MESSAGE HO.** ❌",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE LOGIC KE AAGE CALCULATOR BHI FAIL HO JAYE.** 🧮",
 "**TU EK CANCELLED DOWNLOAD KA EXAMPLE HAI.** ⬇️",
-"**. TU BUFFERING KA SYMBOL HAI.** ⏳",
+"**BHAI TU BUFFERING KA SYMBOL HAI.** ⏳",
 "**TU LIFE KA GLITCH HO.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
+"**BHAI TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎬",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HO – SABKO SKIP KARNA HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HO – SAB IGNORE KARTE HAI.** 📅",
-"**. TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN VERSION HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HO.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC JAISA HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HO JO HAMESHA CRASH HOTI HAI.** 📱",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**. TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
+"**BHAI TU HERO NAHI, SIRF DEMO VIDEO KA CLIP HAI.** 🎞️",
 "**TU EK CRASHED APP HAI – KABHI OPEN NAHI HOTA.** 📱",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**. TU LIFE KA BUG REPORT HAI.** 🐛",
+"**BHAI TU LIFE KA BUG REPORT HAI.** 🐛",
 "**TU EK FORWARDED MESSAGE JAISA HAI – IGNORE KARTA SABKO.** 📩",
 "**TERE HAIRSTYLE SE BARBER BHI SHOCK HO JAYE.** 💇‍♂️",
 "**TU CHALTA PHIRTA CAPTCHA HAI – SABKO CONFUSE KARTA.** 🔢",
-"**. TU LOW BATTERY ALERT HAI.** 🔋",
+"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU EK CANCELLED CALL HO – KOI NAHI SUNTA.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN BHI PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA POSTER HAI.** 🖼️",
-"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO ACCOUNT HAI – INCOMPLETE AUR USELESS.** 📝",
 "**TERE CONFIDENCE KI SPEED 2G INTERNET SE BHI SLOW HAI.** 📉",
 "**TU WALKING TYPO HAI.** ✏️",
-"**. TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
+"**BHAI TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF TEASER VIDEO KA CLIP HAI.** 🎬",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
-"**. TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
+"**BHAI TU OTT TRIAL SHOW HAI – KOI NAHI DEKHTA.** 📺",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – USELESS.** 📄",
 "**TERE UPDATES HAMESHA PENDING REHTE HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU EK WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE HAIRSTYLE SE BARBER BHI CONFUSE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU EK PLAYLIST SKIP BUTTON HAI.** ⏭️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**. TU WIFI KA WEAK SIGNAL HAI.** 📶",
+"**BHAI TU WIFI KA WEAK SIGNAL HAI.** 📶",
 "**TU HERO NAHI, SIRF TEASER KA CLIP HAI.** 🎞️",
 "**TERE UPDATES HAMESHA FAILED HO JATE HAIN.** ⚠️",
 "**TU EK CALENDAR REMINDER HAI – SAB IGNORE KARTE HAIN.** 📅",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAI.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU EK APP HAI JO HAMESHA CRASH HOTI HAI.** 📱",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TERE HAIRSTYLE KA PATCH KABHI RELEASE NAHI HUA.** 🛠️",
 "**TU CHALTA PHIRTA LOW BATTERY WARNING HAI.** 🔋",
-"**. TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
+"**BHAI TU NOTIFICATIONS KA SPAM FOLDER HAI.** 📂",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU EK CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TERE HAIRSTYLE DEKHKAR BARBER BHI RETIRE HO JAYE.** 💇‍♂️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAI.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAI.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
-"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU CHALTA PHIRTA WIFI ERROR HAI.** 📶",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TU EK WALKING TYPO HAI.** ✏️",
-"**. TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL KA EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HAI – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
-"**. TU LOW BATTERY ALERT HAI.** 🔋",
+"**BHAI TU LOW BATTERY ALERT HAI.** 🔋",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
 "**TU EK MUTED MIC HAI.** 🎙️",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU EK OFFLINE FILE HAI – KOI NAHI DEKHTA.** 📄",
 "**TERE UPDATES HAMESHA PENDING HAIN.** ⏳",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU EK FORWARDED WHATSAPP MESSAGE HAI.** 📲",
 "**TERE JOKES DAD JOKES SE BHI WEAK HAIN.** 😂",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**. TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
+"**BHAI TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🛑",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU EK CHALTA PHIRTA WIFI ERROR HAI.** 📶",
-"**. TU LIFE KA PERMANENT BUG HAI.** 🐛",
+"**BHAI TU LIFE KA PERMANENT BUG HAI.** 🐛",
 "**TU HERO NAHI, SIRF GLITCH KA EXAMPLE HAI.** 🖥️",
 "**TERE JOKES SE EVEN AI BHI CONFUSE HO JAYE.** 🤖",
 "**TU CHALTA PHIRTA SPAM CALL HAI.** 📞",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU LIFE KA GLITCH HAI.** 🖥️",
+"**BHAI TU LIFE KA GLITCH HAI.** 🖥️",
 "**TU HERO NAHI, SIRF BETA VERSION KA POSTER HAI.** 🖼️",
-"**. TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
+"**BHAI TU TRIAL VERSION KA HUMAN FORM HAI.** 🧪",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU EK LOW BATTERY WARNING HAI.** 🔋",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP AD HAI.** 🖱️",
 "**TERE BAAT KARTE HI SABKO LAGTA HAI SPAM CALL AAYI.** 📞",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
+"**BHAI TU DEMO ACCOUNT KA HUMAN FORM HAI.** 📝",
 "**TU WALKING ERROR MESSAGE HAI.** ❌",
 "**TU HERO NAHI, SIRF BETA VERSION KA EXAMPLE HAI.** 🧪",
-"**. TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
+"**BHAI TU WIFI SIGNAL KA WEAK VERSION HAI.** 📶",
 "**TU CHALTA PHIRTA GLITCH HAI.** 🖥️",
 "**TERE IDEAS RECYCLE BIN SE BHI BEKAAR HAIN.** 🗑️",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU LOW BATTERY WARNING HAI.** 🔋",
+"**BHAI TU LOW BATTERY WARNING HAI.** 🔋",
 "**TU OTT TRIAL SHOW HO – KOI NAHI DEKHTA.** 📺",
 "**TERE JOKES MEMES SE BHI WEAK HAIN.** 😹",
 "**TU CHALTA PHIRTA BUG REPORT HAI.** 🐛",
-"**. TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
+"**BHAI TU WIFI SIGNAL JAISA HAI – KABHI STRONG KABHI WEAK.** 📶",
 "**TU LIFE KA PENDING UPDATE HAI.** ⏳",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
+"**BHAI TU FORWARDING MESSAGE KA IGNORED VERSION HAI.** 📩",
 "**TU EK CANCELLED CALL KA RINGTONE HAI.** 📞",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
-"**. TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
+"**BHAI TU DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAIN.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️",
-"**. TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
+"**BHAI TU LIFE KA BUG HAI – PATCH NAHI HUA.** 🐛",
 "**TU HERO NAHI, SIRF BETA TRAILER KA CLIP HAI.** 🎞️",
 "**TERE IDEAS SABKO CONFUSE KARTE HAIN.** 🤯",
 "**TU CHALTA PHIRTA CRASH REPORT HAI.** ⚠️",
-"**. TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
+"**BHAI TU WIFI ERROR HAI – SIGNAL NAHI MILTA.** 📶",
 "**TU EK DEMO VIDEO HO – SAB IGNORE KARTE HAI.** 🎥",
 "**TERE JOKES MEMES KE AAGE FAIL HO JATE HAIN.** 😹",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
+"**BHAI TU FREE TRIAL EXPIRED VERSION HAI.** ⏳",
 "**TU CHALTA PHIRTA POP-UP HAI.** 🖱️",
 "**TERE BAATEIN NOTIFICATIONS JAISI ANNOYING HAIN.** 🔔",
 "**TU HERO NAHI, SIRF TRAILER KA CLIP HAI.** 🎞️",
 "**TERE EXISTENCE SE LOADING SCREEN PRODUCTIVE LAGTI HAI.** 💻",
 "**TU HERO NAHI, SIRF TRAILER KA TEASER HAI.** 🎬",
-"**. TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
+"**BHAI TU SPAM FOLDER KA PERMANENT RESIDENT HAI.** 📂",
 "**TU EK DEMO VIDEO HO – INCOMPLETE AUR USELESS.** 🎥",
 "**TERE CONFIDENCE KI SPEED DIAL-UP INTERNET SE BHI SLOW HAI.** 📉",
 "**TU CHALTA PHIRTA TYPO HAI.** ✏️",
-"**. TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
+"**BHAI TU WALKING AD HAI – SAB BLOCK KARTE HAI.** 🛑",
 "**TU EK CHALTA PHIRTA POP-UP HAI.** 🖱️"
 ]
 
@@ -7356,7 +13148,7 @@ roast_abuse_raid_lines = [
     "u|   TUJHE AB TAK NAHI SMJH AYA KI MAI HI HU TUJHE PAIDA KARNE WALA BHOSDIKEE APNI MAA SE PUCH RANDI KE BACHEEEE 🤩👊👤😍",
     "uM   TERI MAA KE BHOSDE MEI SPOTIFY DAL KE LOFI BAJAUNGA DIN BHAR 😍🎶🎶💥",
     "JUNGLE ME NACHTA HE MORE TERI MAAKI CHUDAI DEKKE SAB BOLTE ONCE MORE ONCE MORE 🤣🤣💦💋�I   GALI GALI ME REHTA HE SAND TERI MAAKO CHOD DALA OR BANA DIA RAND 🤤🤣�",
-    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE . DEDIYA",
+    "NABE RANDIKE BACHHE AUKAT NHI HETO APNI RANDI MAAKO LEKE AAYA MATH KAR HAHAHAHA�;KIDZ MADARCHOD TERI MAAKO CHOD CHODKE TERR LIYE BHAI DEDIYA",
     "MAA KAA BJSODAAA� MADARXHODDDz TERIUUI MAAA KAA BHSODAAAz-TERIIIIII BEHENNNN KO CHODDDUUUU MADARXHODDDDz NIKAL MADARCHODz RANDI KE BACHEz TERA MAA MERI FANz TERI SEXY BAHEN KI CHUT",
     "BETE TU BAAP SE LEGA PANGA TERI MAAA KO CHOD DUNGA KARKE NANGA 💦💋",
     "CHAL BETA TUJHE MAAF KIA 🤣 ABB APNI GF KO BHEJ",
@@ -7573,7 +13365,7 @@ flirt_girl_raid_lines = [
     "**Tum meri love story ka star ho jo hamesha chamakta hai 🌟**",
     "**Tumhari muskaan se mera din bright ho jata hai ☀️**",
     "**Tumhari aankhen meri duniya ka noor hain ✨**",
-    "**Tumhare saath har pal meri life ka gift hai 🎁**",
+    "**Tumhare saath har pal meri    life ka gift hai 🎁**",
     "**Tum meri love story ka magic aur hero ho 💖**",
     "**Tumhari awaaz sunke dil me khushi aur pyaar jagta hai 🎵**",
     "**Tumhari baatein meri zindagi me rang bhar deti hain 🌸**",
@@ -9033,7 +14825,7 @@ middle_finger_lines = [
     "**🖕 GAANDU! 🖕😂**",
     "**🖕 LODE! 🖕😂**",
     "**🖕 KUTTE KE PILLE! 🖕😂**",
-    "**🖕 .NS KI AULAAD! 🖕😂**",
+    "**🖕 BHAINS KI AULAAD! 🖕😂**",
     "**🖕 TERI KI MAA KI CHUT! 🖕😂**",
     "**🖕 HARAMI! 🖕😂**",
     "**🖕 GANDI NAALI KA BACCHA! 🖕😂**",
@@ -9173,7 +14965,7 @@ async def send_loop(chat_id, msgs, event):
 async def handle_private_message(event):
     global user_status
     if user_status == "offline":
-        await event.reply("💤 **THIS USER IS CURRENTLY OFFLINE**\n\n📵 _Last seen: Recently_\n⏰ _Status: Not available_")
+        await event.reply("```💤 **THIS USER IS CURRENTLY OFFLINE**\n\n📵 _Last seen: Recently_\n⏰ _Status: Not available_```")
 
 # --------- COMMAND HANDLERS -------------
 
@@ -9187,17 +14979,31 @@ async def delay_handler(event):
     # Declare global variables FIRST
     global DELAY_SECONDS, TAG_DELAY
     
-    if len(parts) < 2 or not parts[1].isdigit():
-        status_msg = await event.reply(f"⏰ **Current Delay:** {DELAY_SECONDS} seconds\n\nUse `.delay <seconds>` to change delay")
+    if len(parts) < 2:
+        status_msg = await event.reply(f"⏰ **Current Delay:** {DELAY_SECONDS} seconds\n\nUse `.delay <seconds>` to change delay\nMinimum: 0.1 second")
         await delete_after_delay(status_msg)
         return
     
-    new_delay = int(parts[1])
-    DELAY_SECONDS = new_delay
-    TAG_DELAY = new_delay
-    
-    status_msg = await event.reply(f"✅ **Delay Updated!**\n\n⏰ New Delay: {DELAY_SECONDS} seconds\n\nAll commands will now use {DELAY_SECONDS} seconds delay")
-    await delete_after_delay(status_msg)
+    try:
+        # Allow decimal values like 0.1, 0.5, etc.
+        new_delay = float(parts[1])
+        
+        # Minimum delay check (0.1 seconds = 100 milliseconds)
+        if new_delay < 0.1:
+            status_msg = await event.reply("❌ **Error:** Minimum delay is 0.1 seconds")
+            await delete_after_delay(status_msg)
+            return
+        
+        # Set the new delay
+        DELAY_SECONDS = new_delay
+        TAG_DELAY = new_delay
+        
+        status_msg = await event.reply(f"✅ **Delay Updated!**\n\n⏰ New Delay: {DELAY_SECONDS} seconds\n\nAll commands will now use {DELAY_SECONDS} seconds delay")
+        await delete_after_delay(status_msg)
+        
+    except ValueError:
+        status_msg = await event.reply("❌ **Error:** Please enter a valid number (e.g., 0.1, 0.5, 1, 2)")
+        await delete_after_delay(status_msg)
 
 # 🎬 ANIMATION COMMANDS
 @client.on(events.NewMessage(pattern=r"^\.hack\b"))
@@ -9246,23 +15052,23 @@ async def hack_animation_handler(event):
         if event.chat_id in ongoing_tasks:
             # Final hacked result
             hacked_info = f"""
-✅ **HACKING COMPLETE!** ✅
+```✅ HACKING COMPLETE! ✅
 
-👤 **Target:** {mention}
-🆔 **User ID:** `{target_user.id}`
-📱 **Device:** iPhone 14 Pro
-📍 **Location:** Delhi, India
-📧 **Email:** {target_user.first_name.lower()}123@gmail.com
-📞 **Phone:** +91 XXXXXX{random.randint(1000,9999)}
-💳 **Bank:** SBI Account **XXXX{random.randint(1000,9999)}**
-📸 **Photos:** {random.randint(50,200)} private photos found
-📱 **Last Login:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+👤 Target: {mention}
+🆔 User ID: {target_user.id}
+📱 Device: iPhone 14 Pro
+📍 Location: Delhi, India
+📧 Email: {target_user.first_name.lower()}123@gmail.com
+📞 Phone: +91 XXXXXX{random.randint(1000,9999)}
+💳 Bank: SBI Account **XXXX{random.randint(1000,9999)}**
+📸 Photos: {random.randint(50,200)} private photos found
+📱 Last Login: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-⚠️ **WARNING:** All data has been extracted and stored securely!
-🔒 **Firewall Status:** BREACHED
-📡 **Connection:** ENCRYPTED
+⚠️ WARNING: All data has been extracted and stored securely!
+🔒 Firewall Status: BREACHED
+📡 Connection: ENCRYPTED
 
-💀 **SYSTEM COMPROMISED!** 💀
+💀 SYSTEM COMPROMISED! 💀```
             """
             await hack_msg.edit(hacked_info)
             ongoing_tasks.pop(event.chat_id, None)
@@ -9452,13 +15258,13 @@ async def confirm_broadcast_all_handler(event):
     total_failed = failed_dm + failed_grp + failed_chn
     
     result_msg = f"""
-✅ **BROADCAST COMPLETE!**
+```✅ BROADCAST COMPLETE!
 
-📱 **DMs:** ✓ {sent_dm} | ✗ {failed_dm}
-👥 **Groups:** ✓ {sent_grp} | ✗ {failed_grp}  
-📢 **Channels:** ✓ {sent_chn} | ✗ {failed_chn}
+📱 DMs: ✓ {sent_dm} | ✗ {failed_dm}
+👥 Groups: ✓ {sent_grp} | ✗ {failed_grp}  
+📢 Channels: ✓ {sent_chn} | ✗ {failed_chn}
 ────────────────
-📊 **Total:** ✓ {total_sent} | ✗ {total_failed}
+📊 Total: ✓ {total_sent} | ✗ {total_failed}```
     """
     await progress.edit(result_msg)
     ongoing_tasks.pop('broadcast_all_msg', None); await delete_after_delay(progress, 8)
@@ -9480,7 +15286,7 @@ async def roast_boy_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"🔥 Roast started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔥 Roast started! {count} messages```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(roast_girl|rg)\b"))
 async def roast_girl_handler(event):
@@ -9498,8 +15304,168 @@ async def roast_girl_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"🔥 Roast started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔥 Roast started! {count} messages```"); await delete_after_delay(status_msg)
 
+# Again Raid feature - Automatically reply to specific user's messages
+again_raid_users = {}  # Dictionary to store {user_id: reply_message}
+
+@client.on(events.NewMessage(pattern=r'\.(?:ar|again_raid)(?:\s+(.+))?', outgoing=True))
+async def start_again_raid(event):
+    """Start again raid on a user - automatically reply to their messages"""
+    
+    # Check if replying to a user
+    if not event.is_reply:
+        await event.delete()
+        msg = await event.respond("❌ Please reply to a user to start again raid!\nUsage: .ar <message>")
+        await asyncio.sleep(2)
+        await msg.delete()
+        return
+    
+    # Get the replied message
+    reply_msg = await event.get_reply_message()
+    user_id = reply_msg.sender_id
+    
+    # Get the message to send as auto-reply
+    raid_message = event.pattern_match.group(1)
+    
+    if not raid_message:
+        await event.delete()
+        msg = await event.respond("❌ Please provide a message to send!\nUsage: .ar <message>")
+        await asyncio.sleep(2)
+        await msg.delete()
+        return
+    
+    # Add user to again_raid dictionary
+    again_raid_users[user_id] = raid_message
+    
+    # Delete the command message
+    await event.delete()
+    
+    # Get user info
+    try:
+        user = await event.client.get_entity(user_id)
+        user_name = user.first_name or "User"
+        username = f"@{user.username}" if user.username else f"ID: {user_id}"
+    except:
+        user_name = "User"
+        username = f"ID: {user_id}"
+    
+    # Send confirmation message
+    msg = await event.respond(f"✅ **Again Raid Started!**\n\n**User:** {user_name}\n**Username:** {username}\n**Auto-Reply:** `{raid_message}`\n\n⚠️ Har message par automatically reply hoga!\n⛔ Rokne ke liye: `.sar` ya `.stop_again_raid`")
+    
+    # Wait for 3 seconds and delete the confirmation message
+    await asyncio.sleep(3)
+    await msg.delete()
+
+@client.on(events.NewMessage(pattern=r'\.(?:sar|stop_again_raid)(?:\s+(.+))?$', outgoing=True))
+async def stop_again_raid(event):
+    """Stop again raid on a user"""
+    
+    # Check if "all" command
+    if event.pattern_match.group(1) == "all":
+        if len(again_raid_users) == 0:
+            await event.delete()
+            msg = await event.respond("❌ Koi again raid active nahi hai!")
+            await asyncio.sleep(2)
+            await msg.delete()
+            return
+        
+        count = len(again_raid_users)
+        again_raid_users.clear()
+        
+        await event.delete()
+        msg = await event.respond(f"✅ **Sabhi Again Raids Stopped!**\n\nTotal {count} raids band kar diye gaye.")
+        await asyncio.sleep(3)
+        await msg.delete()
+        return
+    
+    # Check if replying to a user
+    if not event.is_reply:
+        # Show list of active raids
+        if len(again_raid_users) == 0:
+            await event.delete()
+            msg = await event.respond("❌ Koi again raid active nahi hai!")
+            await asyncio.sleep(2)
+            await msg.delete()
+            return
+        
+        await event.delete()
+        
+        text = "**⚠️ Active Again Raids:**\n\n"
+        for uid, msg_text in again_raid_users.items():
+            try:
+                user = await event.client.get_entity(uid)
+                name = user.first_name or "Unknown"
+                text += f"• **{name}** (ID: `{uid}`) - Reply: `{msg_text[:30]}...`\n"
+            except:
+                text += f"• **Unknown User** (ID: `{uid}`) - Reply: `{msg_text[:30]}...`\n"
+        
+        text += "\n**Stop karne ke liye:**\n"
+        text += "• Kisi user ko reply karke `.sar` - specific user stop\n"
+        text += "• `.sar all` - sabhi raids stop"
+        
+        msg = await event.respond(text)
+        await asyncio.sleep(5)
+        await msg.delete()
+        return
+    
+    # Get the replied message
+    reply_msg = await event.get_reply_message()
+    user_id = reply_msg.sender_id
+    
+    # Delete the command message
+    await event.delete()
+    
+    if user_id in again_raid_users:
+        # Remove user from again_raid dictionary
+        del again_raid_users[user_id]
+        
+        # Get user info
+        try:
+            user = await event.client.get_entity(user_id)
+            user_name = user.first_name or "User"
+        except:
+            user_name = "User"
+        
+        msg = await event.respond(f"✅ **Again Raid Stopped!**\n\nUser: {user_name} ke liye again raid band kar diya gaya.")
+        await asyncio.sleep(3)
+        await msg.delete()
+    else:
+        msg = await event.respond("❌ Ye user again raid mein nahi hai!")
+        await asyncio.sleep(2)
+        await msg.delete()
+
+@client.on(events.NewMessage(incoming=True))
+async def again_raid_handler(event):
+    """Handle incoming messages and reply if user is in again_raid"""
+    
+    # Ignore if message is from self
+    if event.message.out:
+        return
+    
+    # Get my user ID
+    me = await event.client.get_me()
+    
+    # Ignore if sender is myself
+    if event.sender_id == me.id:
+        return
+    
+    # Check if sender is in again_raid dictionary
+    if event.sender_id in again_raid_users:
+        raid_message = again_raid_users[event.sender_id]
+        
+        # Small delay to avoid flood
+        await asyncio.sleep(0.1)
+        
+        # Reply to the message
+        try:
+            await event.reply(raid_message)
+        except Exception as e:
+            # If can't reply, remove from again_raid
+            logger.error(f"Error in again_raid reply: {e}")
+            if event.sender_id in again_raid_users:
+                del again_raid_users[event.sender_id]
+                
 @client.on(events.NewMessage(pattern=r"^\.(roast_abuse|ra)\b"))
 async def roast_abuse_handler(event):
     if not is_owner(event): return
@@ -9516,7 +15482,7 @@ async def roast_abuse_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"🔥 Abuse roast started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔥 Abuse roast started! {count} messages```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(flirt_girl|fg)\b"))
 async def flirt_girl_handler(event):
@@ -9534,7 +15500,7 @@ async def flirt_girl_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"💖 Flirt started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💖 Flirt started! {count} messages```"); await delete_after_delay(status_msg)
 
 # 🔥 HINDI ROAST COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(hindi_roast_boy|hrb)\b"))
@@ -9553,7 +15519,7 @@ async def hindi_roast_boy_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"🔥 लड़का रोस्ट शुरू! {count} मैसेज"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔥 लड़का रोस्ट शुरू! {count} मैसेज```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(hindi_roast_girl|hrg)\b"))
 async def hindi_roast_girl_handler(event):
@@ -9571,7 +15537,7 @@ async def hindi_roast_girl_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"🔥 लड़की रोस्ट शुरू! {count} मैसेज"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔥 लड़की रोस्ट शुरू! {count} मैसेज```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(hindi_roast_abuse|hra)\b"))
 async def hindi_roast_abuse_handler(event):
@@ -9589,7 +15555,7 @@ async def hindi_roast_abuse_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"🔥 गाली रोस्ट शुरू! {count} मैसेज"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔥 गाली रोस्ट शुरू! {count} मैसेज```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(hindi_flirt_girl|hfg)\b"))
 async def hindi_flirt_girl_handler(event):
@@ -9607,7 +15573,7 @@ async def hindi_flirt_girl_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"💖 फ्लर्ट शुरू! {count} मैसेज"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💖 फ्लर्ट शुरू! {count} मैसेज```"); await delete_after_delay(status_msg)
 
 # 💣 RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(raid100|r100)\b"))
@@ -9621,7 +15587,7 @@ async def raid100_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply("💣 Raid100 started!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply("```💣 Raid100 started!```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(raid|rd)\b"))
 async def raid_handler(event):
@@ -9634,7 +15600,7 @@ async def raid_handler(event):
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event))
     ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"💣 Raid started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💣 Raid started! {count} messages```"); await delete_after_delay(status_msg)
 
 # 🔁 AUTO-REPLY RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(reply_raid|rr)\b"))
@@ -9644,7 +15610,7 @@ async def reply_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     reply_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"🔁 Reply raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🔁 Reply raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(flirt_raid|fr)\b"))
 async def flirt_raid_handler(event):
@@ -9703,7 +15669,7 @@ async def raid_shayari_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     raid_shayari_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"📜 Raid shayari activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```📜 Raid shayari activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 🔥 ROAST BOY RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(roast_boy_raid|rbr)\b"))
@@ -9723,7 +15689,7 @@ async def roast_girl_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     roast_girl_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"👧 Roast girl raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```👧 Roast girl raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 🗣️ ROAST ABUSE RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(roast_abuse_raid|rar)\b"))
@@ -9733,7 +15699,7 @@ async def roast_abuse_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     roast_abuse_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"🗣️ Roast abuse raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🗣️ Roast abuse raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 💖 FLIRT GIRL RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(flirt_girl_raid|fgr)\b"))
@@ -9743,7 +15709,7 @@ async def flirt_girl_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     flirt_girl_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"💖 Flirt girl raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💖 Flirt girl raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 🔥 HINDI ROAST BOY RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(hindi_roast_boy_raid|hrbr)\b"))
@@ -9763,7 +15729,7 @@ async def hindi_roast_girl_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     hindi_roast_girl_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"👧 Hindi roast girl raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```👧 Hindi roast girl raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 🗣️ HINDI ROAST ABUSE RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(hindi_roast_abuse_raid|hrar)\b"))
@@ -9773,7 +15739,7 @@ async def hindi_roast_abuse_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     hindi_roast_abuse_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"🗣️ Hindi roast abuse raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```🗣️ Hindi roast abuse raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 💖 HINDI FLIRT GIRL RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(hindi_flirt_girl_raid|hfgr)\b"))
@@ -9783,7 +15749,7 @@ async def hindi_flirt_girl_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     hindi_flirt_girl_raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"💖 Hindi flirt girl raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💖 Hindi flirt girl raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 💣 RAID100 RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(raid100_raid|r100r)\b"))
@@ -9793,7 +15759,7 @@ async def raid100_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     raid100_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"💣 Raid100 raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💣 Raid100 raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # 💣 RAID RAID COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(raid_raid|rdr)\b"))
@@ -9803,7 +15769,7 @@ async def raid_raid_handler(event):
     target_user = await get_target_user(event, event.raw_text.split())
     if not target_user: return
     raid_targets[event.chat_id] = target_user.id
-    status_msg = await event.reply(f"💣 Raid raid activated on {target_user.first_name}!"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💣 Raid raid activated on {target_user.first_name}!```"); await delete_after_delay(status_msg)
 
 # STOP RAID COMMANDS
 @client.on(events.NewMessage(pattern=r"^\.(stop_reply_raid|srr)$"))
@@ -9905,7 +15871,14 @@ async def stop_flirt_girl_raid_handler(event):
     else: status_msg = await event.reply("❌ No active flirt girl raid")
     await delete_after_delay(status_msg)
 
-
+@client.on(events.NewMessage(pattern=r"^\.(stop_hindi_roast_boy_raid|shrbr)$"))
+async def stop_hindi_roast_boy_raid_handler(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    if event.chat_id in hindi_roast_boy_raid_targets:
+        hindi_roast_boy_raid_targets.pop(event.chat_id); status_msg = await event.reply("🛑 Hindi roast boy raid stopped")
+    else: status_msg = await event.reply("❌ No active hindi roast boy raid")
+    await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(stop_hindi_roast_girl_raid|shrgr)$"))
 async def stop_hindi_roast_girl_raid_handler(event):
@@ -10032,7 +16005,7 @@ async def mass_love_handler(event):
     prev = ongoing_tasks.get(event.chat_id)
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event)); ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"💖 Mass love started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```💖 Mass love started! {count} messages```"); await delete_after_delay(status_msg)
 
 @client.on(events.NewMessage(pattern=r"^\.(shayari|shr)\b"))
 async def shayari_handler(event):
@@ -10059,7 +16032,7 @@ async def raid_shayari_handler(event):
     prev = ongoing_tasks.get(event.chat_id)
     if prev and not prev.done(): prev.cancel()
     task = asyncio.create_task(send_loop(event.chat_id, msgs, event)); ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"📜 Shayari raid started! {count} messages"); await delete_after_delay(status_msg)
+    status_msg = await event.reply(f"```📜 Shayari raid started! {count} messages```"); await delete_after_delay(status_msg)
 
 # 👥 SPECIAL FEATURES - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(clone|cl)\b"))
@@ -10075,7 +16048,7 @@ async def clone_handler(event):
     success = await clone_profile(target_user)
     if success:
         cloned_bio = user_clones[OWNER_ID]['target_bio']
-        await cloning_msg.edit(f"✅ **Profile Cloned!**\n\n👤 Now: **{target_user.first_name}**\n📝 Bio: {cloned_bio if cloned_bio else 'No bio'}\n🖼️ PFP: ✅ Cloned\n\nUse `.unclone` to restore.")
+        await cloning_msg.edit(f"```✅ **Profile Cloned!**\n\n👤 Now: **{target_user.first_name}**\n📝 Bio: {cloned_bio if cloned_bio else 'No bio'}\n🖼️ PFP: ✅ Cloned\n\nUse `.unclone` to restore.```")
         await delete_after_delay(cloning_msg, 3)
     else: await cloning_msg.edit("❌ Clone failed!"); await delete_after_delay(cloning_msg)
 
@@ -10089,36 +16062,6 @@ async def unclone_handler(event):
     success = await restore_original_profile()
     if success: await restoring_msg.edit("✅ **Profile Restored!**"); await delete_after_delay(restoring_msg, 3)
     else: await restoring_msg.edit("❌ Restore failed!"); await delete_after_delay(restoring_msg)
-
-# 📊 CHECKNAME COMMAND - LONG + SHORT
-@client.on(events.NewMessage(pattern=r"^\.(checkname|cn)\b"))
-async def checkname_handler(event):
-    if not is_owner(event): return
-    await delete_command_message(event)
-    
-    target_user = await get_target_user(event, event.raw_text.split())
-    if not target_user:
-        status_msg = await event.reply("❌ Reply to user or use @username/userid")
-        await delete_after_delay(status_msg)
-        return
-    
-    try:
-        user_id = target_user.id
-        current_name = f"{target_user.first_name or ''} {target_user.last_name or ''}".strip()
-        
-        processing_msg = await event.reply(f"🔍 **Fetching name history for {current_name}...**\n\n📡 Connecting to SangMata bots...")
-        
-        for bot_username in SANGMATA_BOTS:
-            try:
-                await client.send_message(bot_username, f"/info {user_id}")
-                await asyncio.sleep(2)
-            except: pass
-        
-        await processing_msg.edit(f"✅ **Requests sent to SangMata bots!**\n\n👤 **Target:** {current_name}\n🆔 **User ID:** {user_id}\n\n📨 Check your chats with:\n• @SangMata_BOT\n• @SangMata_beta_bot\n\nThey will send the complete name history directly.")
-        
-    except Exception as e:
-        error_msg = await event.reply(f"❌ Error fetching name history: {str(e)}")
-        await delete_after_delay(error_msg)
 
 # 🏷 TAGGING COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(mass_tag|mtag|mt)\b"))
@@ -10190,30 +16133,74 @@ async def userinfo_handler(event):
     await delete_command_message(event)
     target_user = await get_target_user(event, event.raw_text.split()) or await event.get_sender()
     user_info = f"""
-👤 **User Info**
+```👤 User Info
 
-**Name:** {target_user.first_name} {target_user.last_name or ''}
-**Username:** @{target_user.username or 'N/A'}
-**User ID:** `{target_user.id}`
-**Bot:** {'✅ Yes' if target_user.bot else '❌ No'}
-**DC ID:** {target_user.photo.dc_id if target_user.photo else 'N/A'}
+Name: {target_user.first_name} {target_user.last_name or ''}
+Username: @{target_user.username or 'N/A'}
+User ID: `{target_user.id}`
+Bot: {'✅ Yes' if target_user.bot else '❌ No'}
+DC ID: {target_user.photo.dc_id if target_user.photo else 'N/A'}
 
-**Chat ID:** `{event.chat_id}`
+Chat ID: {event.chat_id}```
     """
-    info_msg = await event.reply(user_info); await delete_after_delay(info_msg)
+    await event.reply(user_info)
+
+
+import psutil
 
 @client.on(events.NewMessage(pattern=r"^\.(ping|pg)$"))
 async def ping_handler(event):
     if not is_owner(event): return
     await delete_command_message(event)
-    start = time.time(); msg = await event.reply("🏓 Pong!"); end = time.time()
-    await msg.edit(f"🏓 **Pong!**\n⏱️ {(end-start)*1000:.2f}ms"); await delete_after_delay(msg)
-
+    
+    start = time.time()
+    msg = await event.reply("🏓 Pong!")
+    end = time.time()
+    response_time = (end - start) * 1000
+    
+    # Check API latency
+    api_start = time.time()
+    await client.get_me()
+    api_end = time.time()
+    api_latency = (api_end - api_start) * 1000
+    
+    # Calculate uptime
+    uptime = datetime.now() - bot_start_time
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    uptime_str = ""
+    if days > 0:
+        uptime_str += str(days) + "d "
+    if hours > 0:
+        uptime_str += str(hours) + "h "
+    if minutes > 0:
+        uptime_str += str(minutes) + "m "
+    uptime_str += str(seconds) + "s"
+    
+    # Get system info
+    cpu_usage = psutil.cpu_percent()
+    memory_usage = psutil.virtual_memory().percent
+    
+    # Build response text exactly as you want
+    response_text = "```🏓 Pong!\n"
+    
+    response_text += "📡 Response Time: " + str(round(response_time, 2)) + "ms\n"
+    response_text += "💓 API Latency: " + str(round(api_latency, 2)) + "ms\n"
+    response_text += "🖥️ CPU Usage: " + str(cpu_usage) + "%\n"
+    response_text += "🧠 Memory: " + str(memory_usage) + "%\n"
+    response_text += "📊 Uptime: " + uptime_str + "```"
+    
+    await msg.edit(response_text)
+    await delete_after_delay(msg)
+    
 @client.on(events.NewMessage(pattern=r"^\.(alive|al)$"))
 async def alive_handler(event):
     if not is_owner(event): return
     await delete_command_message(event)
-    alive_msg = await event.reply("🤖 **BOT IS ALIVE AND RUNNING!**\n\n⚡️ Status: Online\n🔥 Features: Working\n💖 Owner: Active"); await delete_after_delay(alive_msg)
+    alive_msg = await event.reply("🤖 **BOT IS ALIVE AND RUNNING!**\n\n⚡️ Status: Online\n🔥 Features: Working\n💖 Owner: Active");
+    await delete_after_delay(alive_msg)
 
 # 🛑 CONTROL COMMANDS - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(stop|st)$"))
@@ -10242,7 +16229,7 @@ async def stop_all_handler(event):
     if event.chat_id in raid100_targets: raid100_targets.pop(event.chat_id); stopped_count += 1
     if event.chat_id in raid_targets: raid_targets.pop(event.chat_id); stopped_count += 1
     status_msg = await event.reply(f"🛑 Stopped {stopped_count} tasks"); await delete_after_delay(status_msg)
-0
+
 @client.on(events.NewMessage(pattern=r"^\.(stop_roast|stoproast|str)$"))
 async def stop_roast(event):
     if not is_owner(event): return
@@ -10288,33 +16275,6 @@ async def purge_all_handler(event):
         status_msg = await event.reply(f"🗑️ Deleted {count} messages"); await delete_after_delay(status_msg)
     except: pass
 
-@client.on(events.NewMessage(pattern=r"^\.(spam|sp)\b"))
-async def spam_handler(event):
-    if not is_owner(event): return
-    await delete_command_message(event)
-    parts = event.raw_text.split(maxsplit=3)
-    if len(parts) < 4 or not parts[2].isdigit(): return
-    target_user = await get_target_user(event, [parts[0], parts[1]])
-    if not target_user: return
-    count = min(int(parts[2]), MAX_PER_RUN); msg = parts[3]
-    mention = f"[{target_user.first_name}](tg://user?id={target_user.id})"
-    msgs = [f"{mention} {msg}" for _ in range(count)]
-    prev = ongoing_tasks.get(event.chat_id)
-    if prev and not prev.done(): prev.cancel()
-    task = asyncio.create_task(send_loop(event.chat_id, msgs, event)); ongoing_tasks[event.chat_id] = task
-    status_msg = await event.reply(f"💣 Spam started! {count} messages"); await delete_after_delay(status_msg)
-
-    # ---------------------------
-# KEEP ALIVE FUNCTION
-# ---------------------------
-async def keep_alive():
-    while True:
-        try:
-            await client.send_message("me", "🟢 Alive")  # self-ping
-        except Exception as e:
-            print("KeepAlive Error:", e)
-        await asyncio.sleep(600)  # 10 minutes
-
 
 # 📱 STATUS COMMAND - LONG + SHORT
 @client.on(events.NewMessage(pattern=r"^\.(status|stat)\b"))
@@ -10334,124 +16294,382 @@ async def status_handler(event):
     await delete_after_delay(status_msg)
 
 # ❓ HELP COMMAND
-@client.on(events.NewMessage(pattern=r"^\.(help|hp)$"))
-async def help_handler(event):
+@client.on(events.NewMessage(pattern=r"^\.help$"))
+async def help_main_menu(event):
     if not is_owner(event): return
-    help_msg = """
-🤖 **ULTIMATE BOT COMMANDS** 🤖
+    await delete_command_message(event)
+    main_menu = """
+```╭━━━━⟬🤖 ULTIMATE NEXUS USERBOT HELP MENU 🤖⟭━━━━╮
+┃                                                
+┃    📚 Select a page to view commands:          
+┃                                                
+┃    ⟡➣ PAGE 1 - SETTINGS & ANIMATION           
+┃        .help1 - Delay, Broadcast, Animation    
+┃                                                
+┃    ⟡➣ PAGE 2 - ROAST AND SPAM COMMANDS        
+┃        .help2 - English/Hindi Roast & Flirt    
+┃                                                
+┃    ⟡➣ PAGE 3 - AUTO RAID COMMANDS              
+┃        .help3 - Raid and Auto-Raid commands    
+┃                                                
+┃    ⟡➣ PAGE 4 - STOP COMMANDS                   
+┃        .help4 - All Stop commands               
+┃                                                
+┃    ⟡➣ PAGE 5 - ROMANCE & TAGGING               
+┃        .help5 - Love, Shayari, Tagging         
+┃                                                
+┃    ⟡➣ PAGE 6 - SPECIAL FEATURES                 
+┃        .help6 - Clone, Weather, AI Image       
+┃                                                
+┃    ⟡➣ PAGE 7 - MODERATION                       
+┃        .help7 - Gban, Gmute, Purge             
+┃                                                
+┃    ⟡➣ PAGE 8 - OSINT & INFO                     
+┃        .help8 - Phone, Aadhar, IP lookup       
+┃                                                
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(main_menu)
 
-⚙️ **Settings Commands**
-`.delay` / `.dly` <seconds> - Change delay between messages (Current: 6s)
+# PAGE 1 - SETTINGS & ANIMATION
+@client.on(events.NewMessage(pattern=r"^\.help1$"))
+async def help_page1(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page1 = """
+```╭━━━━⟬📖 SETTINGS & ANIMATION⟭━━━━╮
+┃                                  
+┃    ⚙️ Settings Commands           
+┃    ⟡➣ .delay / .dly <seconds>    
+┃        Change delay (Current: 6s) 
+┃                                  
+┃    🎬 Animation Commands          
+┃    ⟡➣ .hack [@user] - Hacking (~120 sec)
+┃    ⟡➣ .middlefinger / .mf [@user] - Middle finger
+┃    ⟡➣ .dance - Dance animation    
+┃    ⟡➣ .love - Love animation      
+┃    ⟡➣ .bomb - Bomb blast          
+┃    ⟡➣ .clock - Clock animation    
+┃    ⟡➣ .train - Moving train       
+┃    ⟡➣ .party - Party animation    
+┃    ⟡➣ .ghost - Ghost appearance   
+┃    ⟡➣ .india - India patriotic    
+┃    ⟡➣ .rain - Rain animation      
+┃    ⟡➣ .storm - Storm animation    
+┃    ⟡➣ .snow - Snowfall animation  
+┃    ⟡➣ .fire - Fire effect         
+┃    ⟡➣ .lightning - Lightning strike
+┃    ⟡➣ .cobra - Cobra snake        
+┃    ⟡➣ .heart - Heart animation    
+┃    ⟡➣ .helicopter - Helicopter    
+┃    ⟡➣ .gmm - Good morning         
+┃    ⟡➣ .gn - Good night            
+┃    ⟡➣ .drugs - Drugs warning      
+┃    ⟡➣ .gf - Girlfriend animation  
+┃    ⟡➣ .tank - Tank war            
+┃    ⟡➣ .hmm - Thinking animation   
+┃    ⟡➣ .fuck - Angry abuse         
+┃    ⟡➣ .cat - Cute cat animation   
+┃    ⟡➣ .pikachu - Pikachu animation
+┃    ⟡➣ .nikal - Go away animation  
+┃                                  
+┃    📢 Broadcast Commands           
+┃    ⟡➣ .broadcast_dm / .bdm <msg> - All DMs
+┃    ⟡➣ .broadcast_group / .bgrp <msg> - All groups
+┃    ⟡➣ .broadcast_channel / .bchn <msg> - All channels
+┃    ⟡➣ .broadcast_all / .ball <msg> - All chats
+┃    ⟡➣ .broadcast_current / .bcur <msg> - Current chat
+┃                                  
+┃    Navigate: .help (Menu) | .help2 (Next)  
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page1)
 
-🎬 **Animation Commands**
-`.hack` [@user] - Dangerous hacking animation (~120 sec)
-`.middlefinger` / `.mf` [@user] - Middle finger abuse animation (~120 sec)
+# PAGE 2 - ROAST COMMANDS
+@client.on(events.NewMessage(pattern=r"^\.help2$"))
+async def help_page2(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page2 = """
+```╭━━━━⟬📖 ROAST COMMANDS⟭━━━━╮
+┃                            
+┃    🔥 Roast Commands (English)
+┃    ⟡➣ .roast_boy / .rb [@user] [count]
+┃    ⟡➣ .roast_girl / .rg [@user] [count]
+┃    ⟡➣ .roast_abuse / .ra [@user] [count]
+┃    ⟡➣ .flirt_girl / .fg [@user] [count]
+┃                            
+┃    🔥 Roast Commands (Hindi)
+┃    ⟡➣ .hindi_roast_boy / .hrb [@user] [count]
+┃    ⟡➣ .hindi_roast_girl / .hrg [@user] [count]
+┃    ⟡➣ .hindi_roast_abuse / .hra [@user] [count]
+┃    ⟡➣ .hindi_flirt_girl / .hfg [@user] [count]
+┃                            
+┃    💣 Raid Commands        
+┃    ⟡➣ .raid100 / .r100 <msg> - 100x message
+┃    ⟡➣ .raid / .rd <count> <msg> - Custom
+┃    ⟡➣ .spam <delay> <msg> - Spam user
+┃                            
+┃    Navigate: .help1 (Prev) | .help (Menu) | .help3 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page2)
 
-📢 **Broadcast Commands**
-`.broadcast_dm` / `.bdm` <msg> - Send to all DMs
-`.broadcast_group` / `.bgrp` <msg> - Send to all groups  
-`.broadcast_channel` / `.bchn` <msg> - Send to all channels
-`.broadcast_all` / `.ball` <msg> - Send to DMs + Groups + Channels
-`.broadcast_current` / `.bcur` <msg> - Send to current chat only
+# PAGE 3 - RAID COMMANDS
+@client.on(events.NewMessage(pattern=r"^\.help3$"))
+async def help_page3(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page3 = """
+```╭━━━━⟬📖 RAID COMMANDS⟭━━━━╮
+┃                            
+┃    🔁 Auto-Reply Raids      
+┃    ⟡➣ .reply_raid / .rr [@user]
+┃    ⟡➣ .flirt_raid / .fr [@user]
+┃    ⟡➣ .love_raid / .lr [@user]
+┃    ⟡➣ .quote_raid / .qr [@user]
+┃    ⟡➣ .mass_love_raid / .mlr [@user]
+┃    ⟡➣ .shayari_raid / .sr [@user]
+┃    ⟡➣ .raid_shayari_raid / .rsr [@user]
+┃    ⟡➣ .roast_boy_raid / .rbr [@user]
+┃    ⟡➣ .roast_girl_raid / .rgr [@user]
+┃    ⟡➣ .roast_abuse_raid / .rar [@user]
+┃    ⟡➣ .flirt_girl_raid / .fgr [@user]
+┃    ⟡➣ .hindi_roast_boy_raid / .hrbr [@user]
+┃    ⟡➣ .hindi_roast_girl_raid / .hrgr [@user]
+┃    ⟡➣ .hindi_roast_abuse_raid / .hrar [@user]
+┃    ⟡➣ .hindi_flirt_girl_raid / .hfgr [@user]
+┃    ⟡➣ .raid100_raid / .r100r [@user]
+┃    ⟡➣ .raid_raid / .rdr [@user]
+┃                            
+┃    Navigate: .help2 (Prev) | .help (Menu) | .help4 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page3)
 
-🔥 **Roast Commands (English)**
-`.roast_boy` / `.rb` [@user] [count] - Boys roast
-`.roast_girl` / `.rg` [@user] [count] - Girls roast  
-`.roast_abuse` / `.ra` [@user] [count] - Abuse roast
-`.flirt_girl` / `.fg` [@user] [count] - Flirt lines
+# PAGE 4 - STOP COMMANDS
+@client.on(events.NewMessage(pattern=r"^\.help4$"))
+async def help_page4(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page4 = """
+```╭━━━━⟬📖 STOP COMMANDS⟭━━━━╮
+┃                            
+┃    🛑 Stop Commands         
+┃    ⟡➣ .stop_reply_raid / .srr
+┃    ⟡➣ .stop_flirt_raid / .sfr
+┃    ⟡➣ .stop_love_raid / .slr
+┃    ⟡➣ .stop_quote_raid / .sqr
+┃    ⟡➣ .stop_mass_love_raid / .smlr
+┃    ⟡➣ .stop_shayari_raid / .ssr
+┃    ⟡➣ .stop_raid_shayari_raid / .srsr
+┃    ⟡➣ .stop_roast_boy_raid / .srbr
+┃    ⟡➣ .stop_roast_girl_raid / .srgr
+┃    ⟡➣ .stop_roast_abuse_raid / .srar
+┃    ⟡➣ .stop_flirt_girl_raid / .sfgr
+┃    ⟡➣ .stop_hindi_roast_boy_raid / .shrbr
+┃    ⟡➣ .stop_hindi_roast_girl_raid / .shrgr
+┃    ⟡➣ .stop_hindi_roast_abuse_raid / .shrar
+┃    ⟡➣ .stop_hindi_flirt_girl_raid / .shfgr
+┃    ⟡➣ .stop_raid100_raid / .sr100r
+┃    ⟡➣ .stop_raid_raid / .srdr
+┃    ⟡➣ .stop / .st - Stop all tasks
+┃    ⟡➣ .stop_roast / .stoproast / .str
+┃    ⟡➣ .stop_tag / .stoptag / .stt
+┃                            
+┃    Navigate: .help3 (Prev) | .help (Menu) | .help5 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page4)
 
-🔥 **Roast Commands (Hindi)**
-`.hindi_roast_boy` / `.hrb` [@user] [count] - लड़का रोस्ट
-`.hindi_roast_girl` / `.hrg` [@user] [count] - लड़की रोस्ट
-`.hindi_roast_abuse` / `.hra` [@user] [count] - गाली रोस्ट
-`.hindi_flirt_girl` / `.hfg` [@user] [count] - फ्लर्ट लाइन्स
+# PAGE 5 - ROMANCE & TAGGING
+@client.on(events.NewMessage(pattern=r"^\.help5$"))
+async def help_page5(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page5 = """
+```╭━━━━⟬📖 ROMANCE & TAGGING⟭━━━━╮
+┃                                
+┃    💖 Romance Commands         
+┃    ⟡➣ .love / .lv [@user]     
+┃    ⟡➣ .quote / .qt [@user]    
+┃    ⟡➣ .mass_love / .mlove / .ml [@user] [count]
+┃    ⟡➣ .shayari / .shr [@user] 
+┃    ⟡➣ .raid_shayari / .raidshayari / .rs [@user] [count]
+┃                                
+┃    🏷 Tagging Commands         
+┃    ⟡➣ .tag_all / .tagall / .ta <msg>
+┃    ⟡➣ .tag_admins / .tagadmins / .tadm <msg>
+┃    ⟡➣ .all <msg> - Faster tagging
+┃    ⟡➣ .cancel - Cancel .all tagging
+┃                                
+┃    Navigate: .help4 (Prev) | .help (Menu) | .help6 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page5)
 
-💣 **Raid Commands**
-`.raid100` / `.r100` <msg> - 100x message
-`.raid` / `.rd` <count> <msg> - Custom count
+# PAGE 6 - SPECIAL FEATURES
+@client.on(events.NewMessage(pattern=r"^\.help6$"))
+async def help_page6(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page6 = """
+```╭━━━━⟬📖 SPECIAL FEATURES⟭━━━━╮
+┃                              
+┃    👥 Special Features       
+┃    ⟡➣ .clone / .cl [@user] - Clone
+┃    ⟡➣ .unclone / .ucl - Revert
+┃    ⟡➣ .translate / .tr - Translate
+┃    ⟡➣ .cp <reply to a photo> - update profile picture
+┃    ⟡➣ .rcp - restore profile picture
+┃    ⟡➣ .bio <text> - Update Bio 
+┃    ⟡➣ .history [@user] - Name history
+┃    ⟡➣ .weather [city] - Weather
+┃    ⟡➣ .zombie - Remove deleted accounts
+┃    ⟡➣ .whois - User info     
+┃    ⟡➣ .search <query> - Web search
+┃    ⟡➣ .dp - Download profile pic
+┃    ⟡➣ .create [prompt] - AI image
+┃    ⟡➣ .online - AI online mode
+┃    ⟡➣ .offline - AI offline mode
+┃    ⟡➣ .qr <text> - QR generator
+┃    ⟡➣ .dl <link> - Download videos
+┃    ⟡➣ .tts <m/f> <hindi/eng> <text> - Text to speech
+┃    ⟡➣ .report <count> <reason> - report message to telegram
+┃    ⟡➣ .name <name> - Stylish name
+┃    ⟡➣ .ascii <text> - ASCII art
+┃    ⟡➣ .ss <url> - Screenshot  
+┃    ⟡➣ .startvc - Start voice chat
+┃    ⟡➣ .join - Join voice chat 
+┃    ⟡➣ .left - Leave voice chat
+┃                              
+┃    Navigate: .help5 (Prev) | .help (Menu) | .help7 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page6)
 
-🔁 **Auto-Reply Raids**
-`.reply_raid` / `.rr` [@user] - Auto-reply abuse
-`.flirt_raid` / `.fr` [@user] - Auto-flirt
-`.love_raid` / `.lr` [@user] - Auto-love lines
-`.quote_raid` / `.qr` [@user] - Auto-quotes
-`.mass_love_raid` / `.mlr` [@user] - Auto-mass love
-`.shayari_raid` / `.sr` [@user] - Auto-shayari
-`.raid_shayari_raid` / `.rsr` [@user] - Auto-raid shayari
-`.roast_boy_raid` / `.rbr` [@user] - Auto-roast boy
-`.roast_girl_raid` / `.rgr` [@user] - Auto-roast girl
-`.roast_abuse_raid` / `.rar` [@user] - Auto-abuse roast
-`.flirt_girl_raid` / `.fgr` [@user] - Auto-flirt girl
-`.hindi_roast_boy_raid` / `.hrbr` [@user] - Auto-hindi roast boy
-`.hindi_roast_girl_raid` / `.hrgr` [@user] - Auto-hindi roast girl
-`.hindi_roast_abuse_raid` / `.hrar` [@user] - Auto-hindi abuse roast
-`.hindi_flirt_girl_raid` / `.hfgr` [@user] - Auto-hindi flirt girl
-`.raid100_raid` / `.r100r` [@user] - Auto-raid100
-`.raid_raid` / `.rdr` [@user] - Auto-raid
+# PAGE 7 - MODERATION
+@client.on(events.NewMessage(pattern=r"^\.help7$"))
+async def help_page7(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page7 = """
+```╭━━━━⟬📖 MODERATION⟭━━━━╮
+┃                        
+┃    🤵 Moderator Commands
+┃    ⟡➣ .gmute - Global mute
+┃    ⟡➣ .gunmute - Global unmute
+┃    ⟡➣ .gmutedlist - Muted list
+┃    ⟡➣ .gban - Global ban  
+┃    ⟡➣ .gungban - Global unban
+┃    ⟡➣ .gbanlist - Ban list
+┃    ⟡➣ .adminlist - Admins list
+┃    ⟡➣ .ban - Ban user
+┃    ⟡➣ .mute - mute user
+┃    ⟡➣ .kick - kick user
+┃    ⟡➣ .unban - Unban user
+┃    ⟡➣ .unmute - unmute user
+┃    ⟡➣ .promote - Promote admin
+┃    ⟡➣ .demote - Demote admin
+┃    ⟡➣ .pin - Pin message  
+┃    ⟡➣ .unpin - Unpin message
+┃                        
+┃    Navigate: .help6 (Prev) | .help (Menu) | .help8 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page7)
 
-🛑 **Stop Commands**
-`.stop_reply_raid` / `.srr` - Stop reply raid
-`.stop_flirt_raid` / `.sfr` - Stop flirt raid
-`.stop_love_raid` / `.slr` - Stop love raid
-`.stop_quote_raid` / `.sqr` - Stop quote raid
-`.stop_mass_love_raid` / `.smlr` - Stop mass love raid
-`.stop_shayari_raid` / `.ssr` - Stop shayari raid
-`.stop_raid_shayari_raid` / `.srsr` - Stop raid shayari
-`.stop_roast_boy_raid` / `.srbr` - Stop roast boy raid
-`.stop_roast_girl_raid` / `.srgr` - Stop roast girl raid
-`.stop_roast_abuse_raid` / `.srar` - Stop abuse raid
-`.stop_flirt_girl_raid` / `.sfgr` - Stop flirt girl raid
-`.stop_hindi_roast_boy_raid` / `.shrbr` - Stop hindi roast boy
-`.stop_hindi_roast_girl_raid` / `.shrgr` - Stop hindi roast girl
-`.stop_hindi_roast_abuse_raid` / `.shrar` - Stop hindi abuse raid
-`.stop_hindi_flirt_girl_raid` / `.shfgr` - Stop hindi flirt girl
-`.stop_raid100_raid` / `.sr100r` - Stop raid100 raid
-`.stop_raid_raid` / `.srdr` - Stop raid raid
+# PAGE 8 - OSINT & CONTROL
+@client.on(events.NewMessage(pattern=r"^\.help8$"))
+async def help_page8(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page8 = """
+```╭━━━━⟬📖 OSINT & CONTROL⟭━━━━╮
+┃                              
+┃    💻 OSINT Commands         
+┃    ⟡➣ .num [number] - Phone lookup
+┃    ⟡➣ .aadhar [number] - Aadhar lookup
+┃    ⟡➣ .vehicle [number] - Vehicle lookup
+┃    ⟡➣ .ip [IP] - IP lookup  
+┃    ⟡➣ .pin [code] - PIN lookup
+┃                              
+┃    📊 Info Commands          
+┃    ⟡➣ .user_info / .userinfo / .ui [@user]
+┃    ⟡➣ .ping / .pg - Status   
+┃    ⟡➣ .alive / .al - Check   
+┃                              
+┃    🛑 Control Commands        
+┃    ⟡➣ .purge - Delete last N
+┃    ⟡➣ .purge_all / .purgeall / .pga - Delete all
+┃                              
+┃    Navigate: .help7 (Prev) | .help9 (Next)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page8)
 
-💖 **Romance Commands**
-`.love` / `.lv` [@user] - Random love line
-`.quote` / `.qt` [@user] - Romantic quote
-`.mass_love` / `.mlove` / `.ml` [@user] [count] - Mass love lines
-`.shayari` / `.shr` [@user] - Random shayari
-`.raid_shayari` / `.raidshayari` / `.rs` [@user] [count] - Shayari raid
+# PAGE 9 - VOICE CHAT MUSIC
+@client.on(events.NewMessage(pattern=r"^\.help9$"))
+async def help_page9(event):
+    if not is_owner(event): return
+    await delete_command_message(event)
+    page9 = """
+```╭━━━━⟬📖 VOICE CHAT MUSIC⟭━━━━╮
+┃                              
+┃    🎵 Music Commands         
+┃    ⟡➣ .play [song/YT link] - Play
+┃    ⟡➣ .skip - Skip current   
+┃    ⟡➣ .queue - Show queue    
+┃    ⟡➣ .end - End & leave     
+┃    ⟡➣ .pause - Pause music   
+┃    ⟡➣ .resume - Resume music 
+┃                              
+┃    Navigate: .help8 (Prev) | .help (Menu)
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯```
+"""
+    await event.reply(page9)
+# QUICK HELP - For quick reference
+@client.on(events.NewMessage(pattern=r"^\.quickhelp$"))
+async def quick_help(event):
+    if not is_owner(event): return
+    
+    quick = """
+```⚡ **QUICK COMMANDS REFERENCE**
 
-🏷 **Tagging Commands**
-`.mass_tag` / `.mtag` / `.mt` <@user> <count> <msg> - Mass tag user
-`.tag_all` / `.tagall` / `.ta` <msg> - Tag all members
-`.tag_admins` / `.tagadmins` / `.tadm` <msg> - Tag admins only
+Most Used:
+.spam <@user> <count> <msg> - Spam user
+.raid <count> <msg> - Raid message
+.broadcast_all <msg> - Broadcast everywhere
+.delay <seconds> - Set delay
+.stop - Stop all tasks
 
-👥 **Special Features**
-`.clone` / `.cl` [@user] - Clone PFP + Name + Bio
-`.unclone` / `.ucl` - Return to normal
-`.checkname` / `.cn` [@user] - Check name history
+Roast:
+.rb [@user] [count] - Roast boy
+.rg [@user] [count] - Roast girl
+.hra [@user] [count] - Hindi abuse roast
 
-📊 **Info Commands**
-`.user_info` / `.userinfo` / `.ui` [@user] - User information
-`.ping` / `.pg` - Bot status
-`.alive` / `.al` - Status check
+Auto-Raids:
+.rr [@user] - Auto-reply raid
+.fr [@user] - Auto-flirt raid
+.rbr [@user] - Auto-roast boy raid
 
-🛑 **Control Commands**
-`.stop` / `.st` - Stop all tasks
-`.stop_roast` / `.stoproast` / `.str` - Stop roast only
-`.stop_tag` / `.stoptag` / `.stt` - Stop tagging only
-`.purge` / `.pg` <count> - Delete last N messages
-`.purge_all` / `.purgeall` / `.pga` - Delete ALL your messages
-`.spam` / `.sp` <@user> <count> <msg> - Spam user
+Info:
+.ui [@user] - User info
+.ping - Check status
+.alive - Bot status
 
-📱 **Status**
-`.status` / `.stat` <online/offline> - Set status
-
-⚡️ **All commands auto-delete after use!**
+For full commands: .help (Main Menu)```
     """
-    await event.reply(help_msg)
-
+    await event.edit(quick)
+# ---------------------------
+# FAKE WEB SERVER TO KEEP USERBOT RUNNING
 async def handle(request):
     return web.Response(text="Userbot running", status=200)
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle)
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
@@ -10464,17 +16682,31 @@ async def start_web_server():
 async def start_handler(event):
     if not is_owner(event): return
     await delete_command_message(event)
-    start_msg = await event.reply("🤖 **Ultimate Bot Started!**\n\n⏰ **Current Delay:** 6 seconds\nUse `.delay <seconds>` to change delay\n\nUse `.help` to see all commands."); await delete_after_delay(start_msg)
+    start_msg = await event.reply(
+    "```🤖 𝐔𝐋𝐓𝐈𝐌𝐀𝐓𝐄 𝐍𝐄𝐗𝐔𝐒 𝐔𝐒𝐄𝐑𝐁𝐎𝐓 𝐀𝐂𝐓𝐈𝐕𝐀𝐓𝐄𝐃!\n"
+    "━━━━━━━━━━━━━━━━\n"
+    "⏰ 𝐂𝐔𝐑𝐑𝐄𝐍𝐓 𝐃𝐄𝐋𝐀𝐘: 6 seconds\n"
+    "📌 𝐂𝐇𝐀𝐍𝐆𝐄 𝐃𝐄𝐋𝐀𝐘: .delay <seconds>\n"
+    "🔧 𝐂𝐎𝐌𝐌𝐀𝐍𝐃 𝐋𝐈𝐒𝐓: .help\n"
+    "━━━━━━━━━━━━━━━━\n"
+    "🌟 Stay tuned for powerful automation!\n\n"
+    "(𝐒𝐭𝐚𝐭𝐮𝐬: Online | Mode: Smooth)```"
+)
+    await asyncio.sleep(7)
+    await delete_after_delay(start_msg)
 
 
 # Start the client
 async def main():
+    global bot_start_time
+    bot_start_time = datetime.now()
     print("Starting userbot...")
     await client.start()
+    global OWNER_ID  # IMPORTANT: Global declare karein
+    me = await client.get_me()
+    OWNER_ID = me.id  # Yahan assign karein
     #fake web server
     await start_web_server()
-    # Start keep-alive task
-    client.loop.create_task(keep_alive())
     me = await client.get_me()
     print(f"Logged in as: {me.first_name} ({me.id})")
     print("Muted list:", muted)
