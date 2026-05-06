@@ -1,6 +1,16 @@
 telethon==1.36.0
 aiohttp
-python-dotenv
+aiosqlite
+colorama
+cryptg
+edge-tts
+ffmpeg-python
+gtts
+numpy
 pillow
+py-tgcalls
 qrcode
 requests
+yt-dlp
+pyfiglet
+psutil
